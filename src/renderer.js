@@ -48,6 +48,26 @@ function appendMicLog(s){ const el=document.getElementById('mic-log'); if(!el) r
 function setLiveStatus(msg, kind){ const el=document.getElementById('live-status'); if(el){ el.textContent=msg; el.className='run-status '+(kind||'muted'); } }
 function appendLiveLog(s){ const el=document.getElementById('live-log'); if(!el) return; if(el.textContent.startsWith('Ready')) el.textContent=''; el.textContent += s; el.scrollTop = el.scrollHeight; }
 function appendServerLog(s){ const el=document.getElementById('server-log'); if(!el) return; if(el.textContent.startsWith('Server log')) el.textContent=''; el.textContent += s; el.scrollTop = el.scrollHeight; }
+function appendOverlayLog(s){ const el=document.getElementById('overlay-log'); if(!el) return; el.textContent += s; el.scrollTop = el.scrollHeight; }
+function showOverlay(title, message, opts={}){
+  const overlay=document.getElementById('startup-overlay');
+  const titleEl=document.getElementById('overlay-title');
+  const msgEl=document.getElementById('overlay-message');
+  const logEl=document.getElementById('overlay-log');
+  const retryBtn=document.getElementById('overlay-retry-btn');
+  const dismissBtn=document.getElementById('overlay-dismiss-btn');
+  if(!overlay) return;
+  overlay.classList.remove('hidden');
+  if(titleEl) titleEl.textContent=title || 'Starting server';
+  if(msgEl) msgEl.textContent=message || '';
+  if(logEl && opts.clear) logEl.textContent='';
+  if(retryBtn) retryBtn.classList.toggle('hidden', !opts.showRetry);
+  if(dismissBtn) dismissBtn.classList.toggle('hidden', !opts.showDismiss);
+}
+function hideOverlay(){
+  const overlay=document.getElementById('startup-overlay');
+  if(overlay) overlay.classList.add('hidden');
+}
 let flashTimer=null;
 function flash(msg){ let el=document.getElementById('toast'); if(!el){ el=document.createElement('div'); el.id='toast'; document.body.appendChild(el);} el.textContent=msg; el.className='toast show'; clearTimeout(flashTimer); flashTimer=setTimeout(()=>el.className='toast',1500); }
 
@@ -85,16 +105,49 @@ function renderModels(){
 }
 
 function render(){
-  const s = state || {}; const srv = s.server || {}; const cfg = s.config || {};
+  const s = state || {}; const srv = s.server || {}; const cfg = s.config || {}; const setup = s.serverSetup || {};
   const running = !!srv.running;
+  const busy = ['installing-binary','starting'].includes(setup.state);
+  const hasServerError = !running && setup.state === 'error' && setup.error;
+
+  // overlay during startup / errors
+  if (busy) {
+    showOverlay(
+      setup.state === 'installing-binary' ? 'Installing llama-server' : 'Starting server',
+      setup.message || 'Setting up llama-server…',
+      { clear: false, showRetry: false, showDismiss: false }
+    );
+  } else if (hasServerError) {
+    showOverlay('Server setup failed', setup.error, { clear: false, showRetry: true, showDismiss: true });
+  } else {
+    hideOverlay();
+  }
+
   const serverPill = document.getElementById('server-pill');
-  serverPill.textContent = running ? `Server: running (${srv.baseUrl||''})` : 'Server: not running';
-  serverPill.className = 'pill ' + (running ? 'ok' : 'info');
+  if (busy) {
+    serverPill.textContent = setup.state === 'installing-binary' ? 'Server: installing…' : 'Server: starting…';
+    serverPill.className = 'pill info';
+  } else {
+    serverPill.textContent = running ? `Server: running (${srv.baseUrl||''})` : 'Server: not running';
+    serverPill.className = 'pill ' + (running ? 'ok' : 'info');
+  }
   const modelNames = srv.models && (srv.models.data || srv.models.models) ? (srv.models.data||srv.models.models).map(m=>m.id||m.name||m.model).filter(Boolean).join(', ') : '—';
   const selected = (srv.selectedModel) || (modelsInfo && (modelsInfo.catalog||[]).find(m=>m.id===modelsInfo.selectedId)) || null;
   const targetModelTxt = selected ? `${selected.label} ${selected.quantLabel} (${selected.tag}) — ${selected.hf}` : (srv.model || '—');
+  const startBtn = document.getElementById('start-server-btn');
+  const stopBtn = document.getElementById('stop-server-btn');
+  const installBtn = document.getElementById('install-server-btn');
+  if (startBtn) { startBtn.disabled = !!busy; startBtn.textContent = running ? 'Restart / ensure' : (setup.state === 'error' ? 'Retry setup' : 'Start / retry'); }
+  if (stopBtn) { stopBtn.disabled = !srv.managed || !!busy; }
+  if (installBtn) { installBtn.disabled = !!busy; installBtn.textContent = (s.managedLlamaBin && s.managedLlamaBin.installed) ? 'Update llama-server' : 'Install llama-server'; }
+  const msgEl = document.getElementById('server-msg');
+  if (msgEl && busy && setup.message) msgEl.textContent = setup.message;
+  else if (msgEl && !busy && setup.state === 'error' && setup.error) msgEl.textContent = `Setup error: ${setup.error}`;
+  else if (msgEl && running && setup.state === 'ready' && setup.message && !msgEl.textContent.startsWith('Setup error')) { /* keep informative messages from actions */ }
+  const managedBin = s.managedLlamaBin || {};
   const rows = [
     ['llama-server binary', s.llamaServerBin || 'not found'],
+    ['Managed llama-server', managedBin.installed ? `installed (${managedBin.path || 'userData/bin'})` : 'not installed (use "Install llama-server")'],
     ['Server status', running ? 'running' : 'not running'],
     ['Server URL', srv.baseUrl || '—'],
     ['Managed by app', srv.managed ? `yes${srv.pid?` (pid ${srv.pid})`:''}` : (srv.external ? 'no (external server in use)' : 'no (not started)')],
@@ -109,6 +162,19 @@ function render(){
   renderModels();
   const serverTxt = running ? (srv.baseUrl || 'running') : 'not running';
   for(const id of ['live-server','mic-server','file-server']){ const el=document.getElementById(id); if(el) el.textContent = serverTxt; }
+
+  // Disable transcription tabs/actions when no server is available
+  const serverNote = running ? '' : 'Server not running — start the server from Overview to use this feature.';
+  for(const id of ['live-status','mic-status','run-status']){ const el=document.getElementById(id); if(el && !running && serverNote) { el.textContent=serverNote; el.className='run-status muted'; } }
+  const liveStartBtn=document.getElementById('live-start-btn'); if(liveStartBtn) liveStartBtn.disabled=!running;
+  const micRecBtn=document.getElementById('mic-record-btn'); if(micRecBtn) micRecBtn.disabled=!running;
+  const fileRunBtn=document.getElementById('run-btn'); if(fileRunBtn) fileRunBtn.disabled=!running;
+  const filePickBtn=document.getElementById('pick-audio-btn'); if(filePickBtn) filePickBtn.disabled=!running;
+  // dim the nav tabs that require a running server
+  for(const nav of document.querySelectorAll('.nav-item[data-nav]')){
+    const name=nav.getAttribute('data-nav');
+    if(['live','mic','file'].includes(name)) nav.classList.toggle('tab-locked', !running);
+  }
   const autoCopy = document.getElementById('auto-copy'); if(autoCopy) autoCopy.checked = !!cfg.autoCopy;
   const autoPaste = document.getElementById('auto-paste'); if(autoPaste) autoPaste.checked = !!cfg.autoPaste;
   const defaultLangSel = document.getElementById('default-language'); if(defaultLangSel && document.activeElement !== defaultLangSel) defaultLangSel.value = cfg.defaultLanguage || 'en';
@@ -148,26 +214,65 @@ function renderHistory(items){
   document.querySelectorAll('[data-del-h]').forEach(b=>b.addEventListener('click', async (e)=>{ const id=e.currentTarget.getAttribute('data-del-h'); const r=await window.offlineApi.deleteHistoryItem(id); state=r; render(); }));
 }
 
-// global log piping (server start + transcribe)
+// global log piping (server start/download/install logs go to the server log).
+// Per-transcription handlers below subscribe for file/mic/live logs to avoid duplication.
 window.offlineApi.onTranscribeLog && window.offlineApi.onTranscribeLog((line)=>{
-  // route to visible logs opportunistically
-  appendServerLog(line); appendLog(line); appendMicLog(line); appendLiveLog(line);
+  appendServerLog(line);
+  appendOverlayLog(line);
 });
 
 // server controls
+document.getElementById('overlay-retry-btn').addEventListener('click', async ()=>{
+  document.getElementById('overlay-log').textContent='';
+  document.getElementById('start-server-btn').click();
+});
+document.getElementById('overlay-dismiss-btn').addEventListener('click', ()=>{ hideOverlay(); });
 document.getElementById('refresh-btn').addEventListener('click', ()=>{ refresh(); flash('Refreshed'); });
 document.getElementById('start-server-btn').addEventListener('click', async ()=>{
-  const msg=document.getElementById('server-msg'); if(msg) msg.textContent='Starting/checking llama-server (first run may download the model)…';
+  const msg=document.getElementById('server-msg'); if(msg) msg.textContent='Ensuring llama-server (may install binary and download model if needed)…';
   document.getElementById('server-log').textContent='';
-  const r = await window.offlineApi.ensureLlamaServer();
-  if(r && r.models) modelsInfo = r.models;
-  if(r && r.status) state=r.status; else await refresh();
-  render();
-  if(msg) msg.textContent = r && r.ok ? `llama-server running at ${r.baseUrl||''}` : `llama-server: ${r.error||r.reason||'not ready'} (it may still be loading/downloading)`;
+  try {
+    const r = await window.offlineApi.ensureLlamaServer();
+    if(r && r.models) modelsInfo = r.models;
+    if(r && r.status) state=r.status; else await refresh();
+    render();
+    if(msg) msg.textContent = r && r.ok ? `llama-server ready at ${r.baseUrl||''}` : `Setup: ${r && r.error ? r.error : 'not ready yet'} (check server log)`;
+  } catch (e) {
+    console.error(e);
+    if(msg) msg.textContent = `Setup error: ${e && e.message ? e.message : e}`;
+    flash('Setup failed');
+  }
 });
 document.getElementById('stop-server-btn').addEventListener('click', async ()=>{
-  const r = await window.offlineApi.stopLlamaServer(); if(r && r.status) state=r.status; else await refresh(); render();
-  const msg=document.getElementById('server-msg'); if(msg) msg.textContent='Managed llama-server stop requested.';
+  const msg=document.getElementById('server-msg');
+  try {
+    const r = await window.offlineApi.stopLlamaServer(); if(r && r.status) state=r.status; else await refresh(); render();
+    if(msg) msg.textContent='Managed llama-server stop requested.';
+  } catch (e) {
+    console.error(e);
+    if(msg) msg.textContent = `Stop error: ${e && e.message ? e.message : e}`;
+    flash('Stop failed');
+  }
+});
+const installServerBtn = document.getElementById('install-server-btn');
+if (installServerBtn) installServerBtn.addEventListener('click', async ()=>{
+  const msg=document.getElementById('server-msg');
+  document.getElementById('server-log').textContent='';
+  if(msg) msg.textContent='Downloading and installing a managed llama-server (Linux x64)…';
+  installServerBtn.disabled = true;
+  try {
+    const r = await window.offlineApi.installLlamaServer();
+    if (r && r.status) state = r.status; else await refresh();
+    render();
+    if (r && r.ok) { if(msg) msg.textContent = `Managed llama-server installed${r.tag ? ' ('+r.tag+')' : ''}. You can now start/check the server.`; flash('llama-server installed'); }
+    else { if(msg) msg.textContent = `Install failed: ${r && r.error ? r.error : 'unknown error'}`; flash(r && r.error ? r.error : 'Install failed'); }
+  } catch (e) {
+    console.error(e);
+    if(msg) msg.textContent = `Install error: ${e && e.message ? e.message : e}`;
+    flash('Install failed');
+  } finally {
+    installServerBtn.disabled = false;
+  }
 });
 document.getElementById('save-url-btn').addEventListener('click', async ()=>{
   const url = (document.getElementById('llama-url').value||'').trim();
@@ -175,6 +280,29 @@ document.getElementById('save-url-btn').addEventListener('click', async ()=>{
 });
 const modelSel = document.getElementById('model-select');
 if (modelSel) modelSel.addEventListener('change', ()=>{ renderModels(); });
+const widgetToggleBtn = document.getElementById('widget-toggle-btn');
+if (widgetToggleBtn) widgetToggleBtn.addEventListener('click', async ()=>{
+  try { await window.offlineApi.showWidget(); flash('Widget shown'); }
+  catch (e) { console.error(e); flash('Widget failed'); }
+});
+window.offlineApi.onWidgetToggleDictate && window.offlineApi.onWidgetToggleDictate(()=>{
+  // toggle live dictation from the widget (same idea as the global hotkey)
+  if (liveRunning) {
+    const stopBtn=document.getElementById('live-stop-btn');
+    if(stopBtn && !stopBtn.disabled) stopBtn.click();
+  } else {
+    if (window.activatePage) window.activatePage('live');
+    const startBtn=document.getElementById('live-start-btn');
+    if(startBtn && !startBtn.disabled) startBtn.click();
+  }
+});
+window.offlineApi.onWidgetStopDictate && window.offlineApi.onWidgetStopDictate(()=>{
+  if (liveRunning) {
+    const stopBtn=document.getElementById('live-stop-btn');
+    if(stopBtn && !stopBtn.disabled) stopBtn.click();
+  }
+});
+
 const applyModelBtn = document.getElementById('apply-model-btn');
 if (applyModelBtn) applyModelBtn.addEventListener('click', async ()=>{
   const sel = document.getElementById('model-select');
@@ -191,6 +319,10 @@ if (applyModelBtn) applyModelBtn.addEventListener('click', async ()=>{
     render();
     if (r && r.ok) { if(msg) msg.textContent = `Model applied. llama-server running at ${r.baseUrl||''}`; flash('Model applied'); }
     else { if(msg) msg.textContent = `Model apply: ${r && r.error ? r.error : 'failed / not ready yet (check server log)'}`; flash(r && r.error ? r.error : 'Model apply failed'); }
+  } catch (e) {
+    console.error(e);
+    if(msg) msg.textContent = `Model apply error: ${e && e.message ? e.message : e}`;
+    flash('Model apply failed');
   } finally {
     applyModelBtn.disabled = false;
   }
@@ -464,6 +596,7 @@ const winCloseBtn = document.getElementById('win-close'); if (winCloseBtn) winCl
     }
     try { localStorage.setItem('local-stt-ui-page', name); } catch {}
   }
+  window.activatePage = activate;
   navItems.forEach(b => b.addEventListener('click', () => activate(b.getAttribute('data-nav'))));
   let initial = 'overview';
   try { initial = localStorage.getItem('local-stt-ui-page') || 'overview'; } catch {}

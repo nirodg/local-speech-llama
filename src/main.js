@@ -69,12 +69,12 @@ function loadHistory() { try { const h = JSON.parse(fs.readFileSync(historyPath(
 function saveHistory(items) { fs.mkdirSync(path.dirname(historyPath()), { recursive: true }); fs.writeFileSync(historyPath(), JSON.stringify(items.slice(0, 200), null, 2)); }
 function addHistory(entry) { const items = loadHistory(); items.unshift({ id: 'h-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7), at: new Date().toISOString(), ...entry }); saveHistory(items); return items; }
 
+// Pinned to the known-good local llama.cpp build (matches /home/dorin/.local/bin/llama).
+const MANAGED_LLAMA_TAG = 'b12182';
+
 const MODEL_CATALOG = [
   { id: 'qwen3-asr-1.7b-q8_0', repo: 'ggml-org/Qwen3-ASR-1.7B-GGUF', quant: 'Q8_0', hf: 'ggml-org/Qwen3-ASR-1.7B-GGUF:Q8_0', label: 'Qwen3-ASR 1.7B', quantLabel: 'Q8_0', tag: 'Default · Best accuracy', description: 'Best accuracy in this range (~5.76 WER), 30 languages, auto language detection.', size: '~2.4 GB', recommended: true },
   { id: 'qwen3-asr-0.6b-q8_0', repo: 'ggml-org/Qwen3-ASR-0.6B-GGUF', quant: 'Q8_0', hf: 'ggml-org/Qwen3-ASR-0.6B-GGUF:Q8_0', label: 'Qwen3-ASR 0.6B', quantLabel: 'Q8_0', tag: 'Fast · Lite', description: 'Smaller/faster, lower RAM; good for quick dictation.', size: '~1.5 GB' },
-  { id: 'voxtral-mini-3b-q4_k_m', repo: 'ggml-org/Voxtral-Mini-3B-2507-GGUF', quant: 'Q4_K_M', hf: 'ggml-org/Voxtral-Mini-3B-2507-GGUF:Q4_K_M', label: 'Voxtral Mini 3B', quantLabel: 'Q4_K_M', tag: 'Alternative engine', description: 'Mistral Voxtral, Apache-2.0, solid English/multilingual transcription.', size: '~2.5 GB' },
-  { id: 'voxtral-mini-4b-realtime-q4_k_m', repo: 'ggml-org/Voxtral-Mini-4B-Realtime-2602-GGUF', quant: 'Q4_K_M', hf: 'ggml-org/Voxtral-Mini-4B-Realtime-2602-GGUF:Q4_K_M', label: 'Voxtral Mini 4B Realtime', quantLabel: 'Q4_K_M', tag: 'Newest · 13 languages', description: 'Newer streaming-native Voxtral model (Feb 2026), 13 languages. Requires a recent llama-server build.', size: '~2.55 GB', requiresRecent: true },
-  { id: 'voxtral-mini-4b-realtime-q8_0', repo: 'ggml-org/Voxtral-Mini-4B-Realtime-2602-GGUF', quant: 'Q8_0', hf: 'ggml-org/Voxtral-Mini-4B-Realtime-2602-GGUF:Q8_0', label: 'Voxtral Mini 4B Realtime', quantLabel: 'Q8_0', tag: 'Higher fidelity', description: 'Higher-fidelity quant of Voxtral 4B Realtime. Requires a recent llama-server build.', size: '~3.66 GB', requiresRecent: true },
 ];
 const DEFAULT_MODEL_ID = 'qwen3-asr-1.7b-q8_0';
 function findModelById(id) { return MODEL_CATALOG.find(m => m.id === id) || null; }
@@ -91,11 +91,26 @@ let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 let widgetWindow = null;
+let widgetVisible = false;
 let listeningActive = false;
 let registeredHotkey = null;
 let hotkeyRegistration = { ok: false, registered: false, accelerator: null, error: null };
 let managedLlama = { proc: null, port: 8178, startedByApp: false, bin: null, model: getSelectedModel().hf, url: null, log: '', lastEnsure: null };
+let serverSetup = { state: 'idle', message: '', error: null, installing: false };
 const SCAN_PORTS = [9931, 8080, 8178, 8081, 8082, 11434];
+
+function setServerSetup(state, message, error = null) {
+  serverSetup = { ...serverSetup, state, message: message || '', error: error || null, installing: state === 'installing-binary' };
+  if (mainWindow && !mainWindow.isDestroyed()) { try { mainWindow.webContents.send('status-changed'); } catch {} }
+}
+
+// Serialize server install/start/restart operations so two flows don't race for the binary/port.
+let ensureLock = Promise.resolve();
+function runWithEnsureLock(fn) {
+  const p = ensureLock.then(() => fn());
+  ensureLock = p.catch(() => {});
+  return p;
+}
 
 function httpGetJson(url, timeoutMs = 1500) {
   return new Promise((resolve) => {
@@ -137,12 +152,30 @@ async function detectRunningLlamaServer() {
   return { running: false };
 }
 
-function findLlamaServerBin() {
-  return findCmd(['llama-server']) || (fs.existsSync('/usr/local/lib/ollama/llama-server') ? '/usr/local/lib/ollama/llama-server' : null);
+function getManagedLlamaBinPath() {
+  try { return path.join(app.getPath('userData'), 'bin', 'llama-server'); } catch { return null; }
+}
+
+function findLlamaServerBin(opts = {}) {
+  const preferManaged = !!opts.preferManaged;
+  const managed = getManagedLlamaBinPath();
+  const candidates = [];
+  if (preferManaged && managed) candidates.push(managed);
+  if (managed) candidates.push(managed);
+  const fromPath = findCmd(['llama-server']);
+  if (fromPath) candidates.push(fromPath);
+  candidates.push('/usr/local/lib/ollama/llama-server');
+  candidates.push('/usr/local/bin/llama-server');
+  const seen = new Set();
+  for (const c of candidates) {
+    if (!c || seen.has(c)) continue; seen.add(c);
+    try { if (fs.existsSync(c)) { fs.accessSync(c, fs.constants.X_OK); return c; } } catch {}
+  }
+  return null;
 }
 
 function getCachedModels() {
-  const bin = findLlamaServerBin();
+  const bin = findLlamaServerBin({ preferManaged: true });
   if (!bin) return [];
   try {
     const r = spawnSync(bin, ['--cache-list'], { encoding: 'utf8', timeout: 10000 });
@@ -158,11 +191,79 @@ function getCachedModels() {
 
 function isModelCached(hfSpec, cachedList) {
   const list = cachedList || getCachedModels();
-  if (!list || !list.length) return false;
-  if (list.includes(hfSpec)) return true;
-  // accept repo-only match if quant unspecified in cache entry form variants
-  const repo = (hfSpec || '').split(':')[0];
-  return list.some(x => x === repo || x.startsWith(repo + ':'));
+  if (list && list.length) {
+    if (list.includes(hfSpec)) return true;
+    const repo = (hfSpec || '').split(':')[0];
+    if (list.some(x => x === repo || x.startsWith(repo + ':'))) return true;
+  }
+  // also consider local HF cache files
+  try { const r = resolveLocalModelFiles(findModelByHf(hfSpec) || { hf: hfSpec, repo: (hfSpec||'').split(':')[0], quant: (hfSpec||'').split(':')[1] || '' }); if (r && r.modelPath) return true; } catch {}
+  return false;
+}
+
+function findFilesRecursive(dir, maxDepth = 4) {
+  const out = [];
+  function walk(d, depth) {
+    if (depth > maxDepth) return;
+    let ents = [];
+    try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p, depth + 1);
+      else if (e.isFile()) out.push(p);
+      else if (e.isSymbolicLink()) {
+        // HF cache stores model files as symlinks inside snapshots/
+        try { if (fs.statSync(p).isFile()) out.push(p); } catch {}
+      }
+    }
+  }
+  walk(dir, 0);
+  return out;
+}
+
+function resolveLocalModelFiles(model) {
+  if (!model) return null;
+  const repo = model.repo || (model.hf || '').split(':')[0] || '';
+  const quant = model.quant || ((model.hf || '').includes(':') ? (model.hf || '').split(':').pop() : '');
+  if (!repo) return null;
+  const repoKey = 'models--' + repo.replace(/\//g, '--');
+  const home = app.getPath('home');
+  const roots = [
+    path.join(home, '.cache', 'huggingface', 'hub', repoKey),
+    path.join(home, '.cache', 'llama.cpp', repoKey),
+    path.join(home, '.cache', 'llama.cpp'),
+  ];
+  let files = [];
+  for (const root of roots) {
+    try { if (fs.existsSync(root)) files = files.concat(findFilesRecursive(root, 5)); } catch {}
+  }
+  if (!files.length) return null;
+  const ggufs = files.filter(f => f.endsWith('.gguf'));
+  const quantLower = String(quant || '').toLowerCase();
+  const repoName = repo.split('/').pop() || '';
+  const scoreModel = (f) => {
+    const b = path.basename(f).toLowerCase();
+    let s = 0;
+    if (b.includes('mmproj')) return -1;
+    if (quantLower && b.includes(quantLower.toLowerCase())) s += 10;
+    if (repoName && b.includes(repoName.toLowerCase().replace(/[^a-z0-9]+/g, '-'))) s += 2;
+    if (b.includes('q8_0')) s += 1;
+    if (b.includes('q4')) s += 1;
+    return s;
+  };
+  const scoreMmproj = (f) => {
+    const b = path.basename(f).toLowerCase();
+    if (!b.includes('mmproj')) return -1;
+    let s = 0;
+    if (quantLower && b.includes(quantLower.toLowerCase())) s += 10;
+    if (b.includes('q8_0')) s += 3;
+    if (b.includes('f16') || b.includes('bf16')) s += 2;
+    return s;
+  };
+  const modelPath = ggufs.map(f => ({ f, s: scoreModel(f) })).filter(x => x.s >= 0).sort((a,b)=>b.s-a.s)[0]?.f || null;
+  const mmprojPath = ggufs.map(f => ({ f, s: scoreMmproj(f) })).filter(x => x.s >= 0).sort((a,b)=>b.s-a.s)[0]?.f || null;
+  if (!modelPath) return null;
+  return { modelPath, mmprojPath };
 }
 
 function getModelsInfo() {
@@ -171,13 +272,119 @@ function getModelsInfo() {
   return {
     selectedId: selected.id,
     selectedHf: selected.hf,
-    catalog: MODEL_CATALOG.map(m => ({ ...m, cached: isModelCached(m.hf, cached) })),
+    catalog: MODEL_CATALOG.map(m => {
+      const local = resolveLocalModelFiles(m);
+      return { ...m, cached: isModelCached(m.hf, cached), localAvailable: !!(local && local.modelPath) };
+    }),
     cachedRaw: cached,
   };
 }
 
+function httpsJson(url, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    try {
+      const u = new URL(url);
+      const req = https.get(url, { timeout: timeoutMs, headers: { 'User-Agent': 'local-speech', 'Accept': 'application/vnd.github+json' } }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) { httpsJson(res.headers.location, timeoutMs).then(resolve); return; }
+        let data = ''; res.setEncoding('utf8');
+        res.on('data', c => data += c);
+        res.on('end', () => { let j = null; try { j = JSON.parse(data); } catch {} resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, json: j, text: data }); });
+      });
+      req.on('timeout', () => { try { req.destroy(); } catch {} resolve({ ok: false }); });
+      req.on('error', () => resolve({ ok: false }));
+    } catch { resolve({ ok: false }); }
+  });
+}
+
+function downloadFile(url, dest, onProgress) {
+  return new Promise((resolve) => {
+    try {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      const file = fs.createWriteStream(dest);
+      const req = https.get(url, { headers: { 'User-Agent': 'local-speech' } }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          file.close(() => { try { fs.unlinkSync(dest); } catch {} downloadFile(res.headers.location, dest, onProgress).then(resolve); });
+          return;
+        }
+        if (res.statusCode < 200 || res.statusCode >= 300) { file.close(() => { try { fs.unlinkSync(dest); } catch {} resolve({ ok: false, status: res.statusCode }); }); return; }
+        const total = parseInt(res.headers['content-length'] || '0', 10) || 0;
+        let got = 0;
+        res.on('data', (chunk) => { got += chunk.length; if (onProgress) onProgress(got, total); });
+        res.pipe(file);
+        file.on('finish', () => file.close(() => resolve({ ok: true, bytes: got })));
+      });
+      req.on('error', (e) => { try { file.close(() => fs.unlinkSync(dest)); } catch {} resolve({ ok: false, error: e.message }); });
+      file.on('error', (e) => { try { file.close(() => fs.unlinkSync(dest)); } catch {} resolve({ ok: false, error: e.message }); });
+    } catch (e) { resolve({ ok: false, error: e.message }); }
+  });
+}
+
+async function installManagedLlamaServer(onLine) {
+  const log = (s) => { try { onLine && onLine(s); } catch {} };
+  if (process.platform !== 'linux' || process.arch !== 'x64') return { ok: false, error: 'Auto-install is currently supported on Linux x64 only. Please install llama-server manually.' };
+  setServerSetup('installing-binary', `Downloading llama-server binary (${MANAGED_LLAMA_TAG})…`);
+  log(`[llama-server] fetching llama.cpp ${MANAGED_LLAMA_TAG} Linux x64 binary...\n`);
+  const rel = await httpsJson(`https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/${MANAGED_LLAMA_TAG}`);
+  if (!rel.ok || !rel.json) { const e = `Failed to fetch llama.cpp release ${MANAGED_LLAMA_TAG} from GitHub.`; setServerSetup('error', e, e); return { ok: false, error: e }; }
+  const asset = (rel.json.assets || []).find(x => /llama-.*bin-ubuntu-x64\.tar\.gz$/i.test(x.name));
+  const tag = rel.json.tag_name || MANAGED_LLAMA_TAG;
+  if (!asset) { const e = `Could not find a Linux x64 binary asset in ${tag}.`; setServerSetup('error', e, e); return { ok: false, error: e }; }
+  const binDir = path.join(app.getPath('userData'), 'bin');
+  const tmpDir = path.join(app.getPath('userData'), 'tmp', 'llama-install');
+  const tarPath = path.join(tmpDir, asset.name);
+  try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  fs.mkdirSync(tmpDir, { recursive: true }); fs.mkdirSync(binDir, { recursive: true });
+  log(`[llama-server] downloading ${asset.name} (${tag})...\n`);
+  let lastPct = -1;
+  const dl = await downloadFile(asset.browser_download_url, tarPath, (got, total) => {
+    if (total) { const pct = Math.floor(got * 100 / total); if (pct !== lastPct && pct % 10 === 0) { lastPct = pct; log(`[llama-server] download ${pct}%\n`); setServerSetup('installing-binary', `Downloading llama-server binary… ${pct}%`); } }
+  });
+  if (!dl.ok) { const e = `Download failed${dl.status ? ' (HTTP '+dl.status+')' : ''}${dl.error ? ': '+dl.error : ''}`; setServerSetup('error', e, e); return { ok: false, error: e }; }
+  setServerSetup('installing-binary', 'Extracting llama-server…');
+  log('[llama-server] extracting...\n');
+  const tarBin = findCmd(['tar']) || 'tar';
+  const ex = spawnSync(tarBin, ['-xzf', tarPath, '-C', tmpDir], { encoding: 'utf8' });
+  if (ex.status !== 0) { const e = `Extraction failed: ${(ex.stderr || ex.stdout || '').slice(-300)}`; setServerSetup('error', e, e); return { ok: false, error: e }; }
+  // find llama-server and copy its directory contents (keeps shared libs together)
+  let found = null;
+  const stack = [tmpDir];
+  while (stack.length && !found) {
+    const d = stack.pop();
+    let ents = []; try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { continue; }
+    for (const e of ents) {
+      const p = path.join(d, e.name);
+      if (e.isFile() && e.name === 'llama-server') { found = p; break; }
+      if (e.isDirectory()) stack.push(p);
+    }
+  }
+  if (!found) { const e = 'Downloaded archive did not contain a llama-server binary.'; setServerSetup('error', e, e); return { ok: false, error: e }; }
+  const srcDir = path.dirname(found);
+  let ents = []; try { ents = fs.readdirSync(srcDir, { withFileTypes: true }); } catch {}
+  for (const e of ents) {
+    const src = path.join(srcDir, e.name);
+    const dst = path.join(binDir, e.name);
+    try {
+      if (e.isSymbolicLink()) {
+        try { fs.unlinkSync(dst); } catch {}
+        const linkTarget = fs.readlinkSync(src);
+        fs.symlinkSync(linkTarget, dst);
+      } else if (e.isFile()) {
+        fs.copyFileSync(src, dst);
+        if (/llama|\.so/.test(e.name) || e.name === 'llama-server') fs.chmodSync(dst, 0o755);
+      }
+    } catch {}
+  }
+  try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  const managed = getManagedLlamaBinPath();
+  if (!managed || !fs.existsSync(managed)) { const e = 'llama-server binary was not installed correctly.'; setServerSetup('error', e, e); return { ok: false, error: e }; }
+  try { fs.chmodSync(managed, 0o755); } catch {}
+  log(`[llama-server] installed managed binary: ${managed} (${tag})\n`);
+  setServerSetup('starting', 'llama-server installed, starting…');
+  return { ok: true, path: managed, tag, asset: asset.name };
+}
+
 async function ensureManagedLlamaServer(onLine, opts = {}) {
-  const bin = findLlamaServerBin();
+  const bin = findLlamaServerBin({ preferManaged: true });
   managedLlama.bin = bin;
   managedLlama.model = getSelectedModel().hf;
   if (!opts.forceManaged) {
@@ -186,15 +393,32 @@ async function ensureManagedLlamaServer(onLine, opts = {}) {
     if (running.running) {
       managedLlama.url = running.baseUrl;
       if (!(managedLlama.proc && !managedLlama.proc.killed && managedLlama.startedByApp)) managedLlama.startedByApp = false;
+      setServerSetup('ready', `Using running llama-server at ${running.baseUrl}`);
       return { ok: true, running: true, reused: true, baseUrl: running.baseUrl, bin, model: managedLlama.model, health: running.health || null };
     }
   }
   if (managedLlama.proc && !managedLlama.proc.killed) {
     // already starting/running managed - wait for readiness below
   } else {
-    if (!bin) return { ok: false, running: false, error: 'llama-server binary not found (install llama.cpp / llama-server)', bin: null };
+    if (!bin) {
+      const err = 'llama-server binary not found. Install llama.cpp/llama-server, or use “Install llama-server” in the app to download a managed binary.';
+      setServerSetup('error', err, err);
+      return { ok: false, running: false, error: err, bin: null };
+    }
     const port = managedLlama.port;
-    const args = ['-hf', managedLlama.model, '--host', '127.0.0.1', '--port', String(port)];
+    const selected = getSelectedModel();
+    const local = resolveLocalModelFiles(selected);
+    let args;
+    if (local && local.modelPath) {
+      args = ['-m', local.modelPath];
+      if (local.mmprojPath) args.push('--mmproj', local.mmprojPath);
+      args.push('--host', '127.0.0.1', '--port', String(port), '-v');
+      onLine && onLine(`[llama-server] using local model files:\n  model: ${local.modelPath}\n  mmproj: ${local.mmprojPath || '(none found)'}\n`);
+      setServerSetup('starting', 'Starting llama-server with cached model…');
+    } else {
+      args = ['-hf', managedLlama.model, '--host', '127.0.0.1', '--port', String(port), '-v'];
+      setServerSetup('starting', 'Starting llama-server (may download model if not cached)…');
+    }
     onLine && onLine(`[llama-server] starting: ${bin} ${args.join(' ')}\n`);
     const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     managedLlama.proc = child; managedLlama.startedByApp = true; managedLlama.log = ''; managedLlama.url = `http://127.0.0.1:${port}`;
@@ -207,28 +431,82 @@ async function ensureManagedLlamaServer(onLine, opts = {}) {
   const timeoutMs = 15 * 60 * 1000; // allow first-run model download
   while (Date.now() - start < timeoutMs) {
     const r = await probeLlamaServer(baseUrl);
-    if (r.running) { managedLlama.url = baseUrl; return { ok: true, running: true, startedByApp: managedLlama.startedByApp, baseUrl, bin, model: managedLlama.model, pid: managedLlama.proc ? managedLlama.proc.pid : null }; }
+    if (r.running) { managedLlama.url = baseUrl; setServerSetup('ready', `llama-server running at ${baseUrl}`); return { ok: true, running: true, startedByApp: managedLlama.startedByApp, baseUrl, bin, model: managedLlama.model, pid: managedLlama.proc ? managedLlama.proc.pid : null }; }
     if (managedLlama.proc && managedLlama.proc.exitCode != null) break;
     await new Promise(res => setTimeout(res, 1000));
   }
   const r = await probeLlamaServer(baseUrl);
   const logTail = managedLlama.log.slice(-2000);
   let error = r.running ? null : 'llama-server not ready yet (it may still be downloading/loading the model)';
-  if (!r.running && /unknown model architecture|unsupported model|failed to load model|key not found|unknown argument/i.test(logTail)) {
+  if (!r.running && /HTTPS is not supported|failed to resolve commit|SSL|TLS|libcurl/i.test(logTail)) {
+    error = 'Your llama-server cannot download models over HTTPS (built without HTTPS/SSL support). Use “Install llama-server” to get a managed binary with HTTPS support, or update llama-server / manually place the model GGUF + mmproj in the Hugging Face cache.';
+  } else if (!r.running && /unknown model architecture|unsupported model|failed to load model|key not found|unknown argument/i.test(logTail)) {
     error = 'Selected model may not be supported by your installed llama-server (architecture/loader mismatch) or the launch failed. Update llama.cpp / llama-server to a newer build, or choose another model.';
   } else if (!r.running && managedLlama.proc && managedLlama.proc.exitCode != null) {
-    error = `llama-server exited (code ${managedLlama.proc.exitCode}) before becoming ready.`;
+    error = `llama-server exited (code ${managedLlama.proc.exitCode}) before becoming ready. Check the server log for details.`;
   }
+  if (!r.running) setServerSetup('error', error || 'Failed to start llama-server', error || null);
   return { ok: r.running, running: r.running, startedByApp: managedLlama.startedByApp, baseUrl, bin, model: managedLlama.model, pid: managedLlama.proc ? managedLlama.proc.pid : null, error, logTail: managedLlama.log.slice(-1200) };
+}
+
+async function autoEnsureServer(onLine, opts = {}) {
+  const log = (s) => { try { onLine && onLine(s); } catch {} };
+  if (!opts.forceManaged) {
+    // 1) reuse if already running
+    const running = await detectRunningLlamaServer();
+    if (running.running) {
+      managedLlama.url = running.baseUrl;
+      managedLlama.startedByApp = false;
+      setServerSetup('ready', `Using running llama-server at ${running.baseUrl}`);
+      log(`[setup] reusing running llama-server at ${running.baseUrl}\n`);
+      return { ok: true, running: true, reused: true, baseUrl: running.baseUrl };
+    }
+  }
+  // 2) ensure binary exists (auto-install managed if none found)
+  let bin = findLlamaServerBin({ preferManaged: true });
+  if (!bin) {
+    setServerSetup('installing-binary', 'No llama-server found. Downloading a managed binary…');
+    log('[setup] no llama-server binary found, installing managed binary...\n');
+    const inst = await installManagedLlamaServer(onLine);
+    if (!inst.ok) { setServerSetup('error', inst.error || 'Failed to install llama-server', inst.error || null); return { ok: false, error: inst.error, installed: false }; }
+    bin = inst.path || findLlamaServerBin({ preferManaged: true });
+    if (!bin) { const e = 'Managed llama-server was installed but the binary path could not be resolved.'; setServerSetup('error', e, e); return { ok: false, error: e }; }
+  }
+  log(`[setup] using llama-server binary: ${bin}\n`);
+  // 3) start server (downloads model if not cached/local)
+  setServerSetup('starting', 'Starting llama-server (first run may download the model)…');
+  let r = await ensureManagedLlamaServer(onLine, { forceManaged: !!opts.forceManaged });
+  if (r.ok) { log(`[setup] llama-server ready at ${r.baseUrl}\n`); return r; }
+  // 4) if failed due to HTTPS download limitation with a non-managed binary, auto-install managed binary and retry once
+  const needsHttps = /cannot download models over HTTPS|HTTPS is not supported|failed to resolve commit/i.test((r.error || '') + '\n' + (managedLlama.log || ''));
+  const usingManaged = !!(bin && getManagedLlamaBinPath() && path.resolve(bin) === path.resolve(getManagedLlamaBinPath()));
+  const local = resolveLocalModelFiles(getSelectedModel());
+  if (needsHttps && !usingManaged && !(local && local.modelPath)) {
+    log('[setup] current llama-server cannot download over HTTPS; installing managed binary and retrying...\n');
+    stopManagedLlamaServer();
+    await new Promise(res => setTimeout(res, 400));
+    const inst = await installManagedLlamaServer(onLine);
+    if (inst.ok) {
+      r = await ensureManagedLlamaServer(onLine, { forceManaged: true });
+    } else {
+      setServerSetup('error', inst.error || r.error || 'Failed to install managed llama-server', inst.error || r.error);
+      return { ok: false, error: inst.error || r.error, install: inst };
+    }
+  }
+  if (!r.ok && r.error) setServerSetup('error', r.error, r.error);
+  return r;
 }
 
 function stopManagedLlamaServer() {
   const p = managedLlama.proc;
-  if (p && !p.killed) {
-    try { p.kill('SIGTERM'); } catch {}
-    setTimeout(() => { try { if (!p.killed) p.kill('SIGKILL'); } catch {} }, 2000);
-  }
-  managedLlama.proc = null; managedLlama.startedByApp = false;
+  managedLlama.proc = null;
+  managedLlama.startedByApp = false;
+  managedLlama.url = null;
+  if (!p) return;
+  const stillRunning = () => p.exitCode == null && p.signalCode == null;
+  if (!stillRunning()) return;
+  try { p.kill('SIGTERM'); } catch {}
+  setTimeout(() => { if (stillRunning()) { try { p.kill('SIGKILL'); } catch {} } }, 2000);
 }
 
 function pasteIntoActiveApp() {
@@ -299,10 +577,13 @@ async function getStatus() {
   if (baseUrl) { const m = await httpGetJson(`${baseUrl.replace(/\/$/, '')}/v1/models`, 1200); if (m.ok) models = m.json; }
   const selected = getSelectedModel(cfg);
   const externalInUse = !!(running.running && !(managedLlama.proc && !managedLlama.proc.killed && managedLlama.startedByApp && managedLlama.url === running.baseUrl));
+  const managedBinPath = getManagedLlamaBinPath();
+  const managedBinInstalled = !!(managedBinPath && fs.existsSync(managedBinPath));
   return {
     offline: false,
     ffmpeg,
     llamaServerBin,
+    managedLlamaBin: { path: managedBinPath, installed: managedBinInstalled },
     server: {
       running: !!running.running || !!(managedLlama.proc && !managedLlama.proc.killed),
       baseUrl: baseUrl || null,
@@ -314,6 +595,7 @@ async function getStatus() {
       models,
       logTail: managedLlama.log ? managedLlama.log.slice(-600) : '',
     },
+    serverSetup,
     config: { ...cfg, autoStart: isAutoStartEnabled(), model: selected.id },
     hotkey: hotkeyRegistration,
     history: loadHistory(),
@@ -344,8 +626,8 @@ async function transcribeWithLlama(audioPath, language, sender) {
   const onLine = (line) => { try { sender && sender.send('transcribe-log', line); } catch {} };
   let running = await detectRunningLlamaServer();
   if (!running.running) {
-    onLine('[llama-server] no running instance detected, starting managed llama-server...\n');
-    const ensured = await ensureManagedLlamaServer(onLine);
+    onLine('[llama-server] no running instance detected, ensuring llama-server (may install/start)...\n');
+    const ensured = await runWithEnsureLock(() => autoEnsureServer(onLine));
     managedLlama.lastEnsure = ensured;
     running = await detectRunningLlamaServer();
   }
@@ -482,6 +764,12 @@ function updateTrayMenu() {
   const contextMenu = Menu.buildFromTemplate([
     { label: `Show ${appName}`, click: () => showMainWindow() },
     {
+      label: 'Dictation widget',
+      type: 'checkbox',
+      checked: !!(widgetVisible && widgetWindow && !widgetWindow.isDestroyed() && widgetWindow.isVisible()),
+      click: (item) => { if (item.checked) showWidget(); else hideWidget(); updateTrayMenu(); }
+    },
+    {
       label: 'Start at login',
       type: 'checkbox',
       checked: autoStartEnabled,
@@ -563,20 +851,38 @@ function createWidgetWindow() {
   return widgetWindow;
 }
 
-function updateWidgetVisibility() {
+function displayWidget() {
   try {
-    if (!listeningActive) {
-      if (widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.hide();
-      return;
-    }
-    if (isMainWindowVisible()) {
-      if (widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.hide();
-      return;
-    }
     const w = createWidgetWindow();
     if (!w || w.isDestroyed()) return;
-    positionWidgetWindow();
     if (!w.isVisible()) w.showInactive();
+  } catch {}
+}
+function showWidget() {
+  widgetVisible = true;
+  displayWidget();
+}
+function hideWidget() {
+  widgetVisible = false;
+  try {
+    if (widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.hide();
+  } catch {}
+}
+function toggleWidget() {
+  if (widgetVisible && widgetWindow && !widgetWindow.isDestroyed() && widgetWindow.isVisible()) hideWidget();
+  else showWidget();
+}
+function updateWidgetVisibility() {
+  try {
+    if (!listeningActive && !widgetVisible) {
+      if (widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.hide();
+      return;
+    }
+    if (isMainWindowVisible() && !widgetVisible) {
+      if (widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.hide();
+      return;
+    }
+    displayWidget();
   } catch {}
 }
 
@@ -649,9 +955,39 @@ app.whenReady().then(() => {
     sendWidgetLevel(payload || {});
     return { ok: true };
   });
+  ipcMain.handle('show-widget', () => { showWidget(); updateTrayMenu(); return { ok: true }; });
+  ipcMain.handle('hide-widget', () => { hideWidget(); updateTrayMenu(); return { ok: true }; });
+  ipcMain.on('widget-clicked', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try { mainWindow.webContents.send('widget-toggle-dictate'); } catch {}
+    }
+  });
+  ipcMain.on('widget-close', () => {
+    hideWidget();
+    updateTrayMenu();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try { mainWindow.webContents.send('widget-stop-dictate'); } catch {}
+    }
+  });
+  let widgetDragStartPos = null;
+  ipcMain.on('widget-drag-start', () => {
+    if (widgetWindow && !widgetWindow.isDestroyed()) {
+      const b = widgetWindow.getBounds();
+      widgetDragStartPos = { x: b.x, y: b.y };
+    }
+  });
+  ipcMain.on('widget-drag-move', (_e, dx, dy) => {
+    if (!widgetDragStartPos || !widgetWindow || widgetWindow.isDestroyed()) return;
+    widgetWindow.setPosition(Math.round(widgetDragStartPos.x + dx), Math.round(widgetDragStartPos.y + dy), false);
+  });
+  ipcMain.on('widget-drag-end', () => { widgetDragStartPos = null; });
   ipcMain.handle('get-status', async () => await getStatus());
-  ipcMain.handle('ensure-llama-server', async (e) => { const r = await ensureManagedLlamaServer((l) => { try { e.sender.send('transcribe-log', l); } catch {} }); managedLlama.lastEnsure = r; return { ...r, status: await getStatus() }; });
-  ipcMain.handle('stop-llama-server', async () => { stopManagedLlamaServer(); return { ok: true, status: await getStatus() }; });
+  ipcMain.handle('ensure-llama-server', async (e) => runWithEnsureLock(async () => {
+    const r = await autoEnsureServer((l) => { try { e.sender.send('transcribe-log', l); } catch {} });
+    managedLlama.lastEnsure = r;
+    return { ...r, status: await getStatus(), models: getModelsInfo() };
+  }));
+  ipcMain.handle('stop-llama-server', async () => { stopManagedLlamaServer(); setServerSetup('idle', 'Managed server stopped'); return { ok: true, status: await getStatus() }; });
   ipcMain.handle('pick-audio', async (e) => {
     const w = BrowserWindow.fromWebContents(e.sender);
     const res = await dialog.showOpenDialog(w, { title: 'Select audio file to transcribe', properties: ['openFile'], filters: [{ name: 'Audio', extensions: ['wav', 'mp3', 'm4a', 'ogg', 'flac', 'webm', 'opus'] }, { name: 'All files', extensions: ['*'] }] });
@@ -683,7 +1019,17 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('set-llama-url', async (_e, url) => { const cfg = loadConfig(); cfg.llamaServerUrl = (url || '').trim(); saveConfig(cfg); return await getStatus(); });
   ipcMain.handle('get-models', async () => getModelsInfo());
-  ipcMain.handle('set-model', async (e, modelId) => {
+  ipcMain.handle('install-llama-server', async (e) => runWithEnsureLock(async () => {
+    if (listeningActive) return { ok: false, error: 'Cannot install llama-server while listening/recording is active.', status: await getStatus() };
+    stopManagedLlamaServer();
+    await new Promise(res => setTimeout(res, 300));
+    const r = await installManagedLlamaServer((l) => { try { e.sender.send('transcribe-log', l); } catch {} });
+    // after manual install, try to start automatically
+    let ensure = r;
+    if (r && r.ok) ensure = await autoEnsureServer((l) => { try { e.sender.send('transcribe-log', l); } catch {} });
+    return { ...r, ensure, status: await getStatus(), models: getModelsInfo() };
+  }));
+  ipcMain.handle('set-model', async (e, modelId) => runWithEnsureLock(async () => {
     if (listeningActive) return { ok: false, error: 'Cannot switch models while listening/recording is active. Stop first.', status: await getStatus(), models: getModelsInfo() };
     const m = findModelById(modelId);
     if (!m) return { ok: false, error: 'Unknown model selection.', status: await getStatus(), models: getModelsInfo() };
@@ -693,14 +1039,14 @@ app.whenReady().then(() => {
     cfg.llamaServerUrl = '';
     saveConfig(cfg);
     managedLlama.model = m.hf;
-    // restart managed server to apply new model
+    // restart managed server to apply new model (installs binary if missing)
     stopManagedLlamaServer();
     // small delay to free port
     await new Promise(res => setTimeout(res, 400));
-    const r = await ensureManagedLlamaServer((l) => { try { e.sender.send('transcribe-log', l); } catch {} }, { forceManaged: true });
+    const r = await autoEnsureServer((l) => { try { e.sender.send('transcribe-log', l); } catch {} }, { forceManaged: true });
     managedLlama.lastEnsure = r;
     return { ...r, status: await getStatus(), models: getModelsInfo() };
-  });
+  }));
   ipcMain.handle('transcribe', async (e, payload) => {
     const { audioPath, language } = payload || {};
     const result = await transcribeWithLlama(audioPath, language, e.sender);
@@ -777,7 +1123,7 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
   applyGlobalHotkey();
-  ensureManagedLlamaServer().then(r => { managedLlama.lastEnsure = r; }).catch(() => {});
+  runWithEnsureLock(() => autoEnsureServer()).then(r => { if (r) managedLlama.lastEnsure = r; }).catch(() => {});
   app.on('activate', () => { showMainWindow(); applyGlobalHotkey(); });
 });
 app.on('before-quit', () => { isQuitting = true; stopManagedLlamaServer(); if (tray) { try { tray.destroy(); } catch {} tray = null; } });

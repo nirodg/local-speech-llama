@@ -88,7 +88,13 @@ function parseTextFromResponse(data) {
   if (!data) return { text: '', err: null };
   try {
     const j = JSON.parse(data);
-    if (j && j.error) return { text: '', err: j.error.message || JSON.stringify(j.error), json: j };
+    if (j && j.error) {
+      let errMsg = j.error.message || JSON.stringify(j.error);
+      if (/chat\/completions|not_supported/i.test(errMsg)) {
+        errMsg = 'This model is not supported for server-based transcription by the current llama-server build. Try Qwen3-ASR.';
+      }
+      return { text: '', err: errMsg, json: j };
+    }
     let text = '';
     if (typeof j === 'string') text = j;
     else if (j && typeof j.text === 'string') text = j.text;

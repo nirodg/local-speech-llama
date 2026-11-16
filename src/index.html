@@ -7,6 +7,19 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <div id="startup-overlay" class="overlay hidden">
+    <div class="overlay-content">
+      <div class="overlay-rocket" aria-hidden="true">🚀</div>
+      <div id="overlay-title" class="overlay-title">Starting server</div>
+      <div id="overlay-message" class="overlay-message">Setting up llama-server…</div>
+      <pre id="overlay-log" class="overlay-log"></pre>
+      <div class="overlay-actions">
+        <button id="overlay-retry-btn" class="secondary hidden">Retry setup</button>
+        <button id="overlay-dismiss-btn" class="secondary hidden">Dismiss</button>
+      </div>
+    </div>
+  </div>
+
   <div class="app-shell">
     <aside class="sidebar">
       <div class="brand drag">
@@ -67,24 +80,26 @@
               <h2>Server status</h2>
               <div class="card-actions actions wrap" style="margin:0">
                 <button id="refresh-btn" class="secondary">Refresh</button>
-                <button id="start-server-btn" class="secondary">Start / check</button>
-                <button id="stop-server-btn" class="secondary">Stop managed</button>
+                <button id="start-server-btn" class="secondary">Start / retry</button>
+                <button id="stop-server-btn" class="secondary">Stop</button>
+                <button id="install-server-btn" class="secondary">Install llama-server</button>
+                <button id="widget-toggle-btn" class="secondary">Show widget</button>
               </div>
             </div>
             <div id="status" class="kv compact-kv">Loading…</div>
-            <div class="panel-grid two" style="margin-top:10px">
+            <div class="panel-grid" style="margin-top:10px">
               <div class="subcard">
                 <div class="subhead">Model &amp; server</div>
                 <div class="actions wrap" style="margin:6px 0 0">
                   <label class="inline grow">Model <select id="model-select"></select></label>
                   <button id="apply-model-btn" class="secondary">Apply model</button>
                 </div>
-                <div id="model-desc" class="hint muted">Select a Qwen3-ASR or Voxtral model. If not cached, llama-server will download it on first start.</div>
+                <div id="model-desc" class="hint muted">Select a Qwen3-ASR model. If not cached, llama-server will download it on first start.</div>
                 <div class="actions wrap" style="margin:8px 0 0">
                   <label class="inline grow">Preferred server URL <input id="llama-url" class="mono" placeholder="e.g. http://127.0.0.1:9931 (optional)" /></label>
                   <button id="save-url-btn" class="secondary">Save</button>
                 </div>
-                <div id="server-msg" class="hint">Managed server: auto-detects a running llama-server or starts one with the selected model.</div>
+                <div id="server-msg" class="hint">Auto-setup: reuses a running llama-server, or installs/starts a managed one and downloads the selected model if needed.</div>
               </div>
               <div class="subcard">
                 <div class="subhead">Server log</div>
