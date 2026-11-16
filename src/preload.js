@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld('offlineApi', {
   onStatusChanged: (cb) => { const h = () => cb(); ipcRenderer.on('status-changed', h); return () => ipcRenderer.removeListener('status-changed', h); },
   setGlobalHotkey: (payload) => ipcRenderer.invoke('set-global-hotkey', payload),
   setLlamaUrl: (url) => ipcRenderer.invoke('set-llama-url', url),
+  getModels: () => ipcRenderer.invoke('get-models'),
+  setModel: (modelId) => ipcRenderer.invoke('set-model', modelId),
   windowMinimize: () => ipcRenderer.invoke('window-minimize'),
   windowClose: () => ipcRenderer.invoke('window-close'),
   setListeningState: (payload) => ipcRenderer.invoke('listening-state', payload),

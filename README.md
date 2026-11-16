@@ -27,7 +27,8 @@ Compact, frameless desktop app that runs speech recognition entirely on your mac
 ## Highlights
 
 - **100% local transcription** — audio is processed by your local `llama-server` (llama.cpp), no cloud required.
-- **Automatic server handling** — detects a running `llama-server` or starts a managed instance (`llama-server -hf ggml-org/Qwen3-ASR-1.7B-GGUF`) when needed.
+- **Automatic server handling** — detects a running `llama-server` or starts a managed instance with the model you select.
+- **Model picker (Qwen3-ASR + Voxtral)** — choose from built-in Qwen3-ASR and Voxtral GGUF models (with descriptions like *Default · Best accuracy*, *Fast · Lite*, *Alternative engine*, *Newest*, *Higher fidelity*). If a model isn’t cached locally, `llama-server` downloads it on first start.
 - **Multiple input modes**
   - **Live dictation:** chunked near-realtime transcription with VAD/silence chunking and configurable auto-stop.
   - **Microphone:** record a take and transcribe it.
@@ -44,11 +45,23 @@ Compact, frameless desktop app that runs speech recognition entirely on your mac
 
 ## How it works
 
-Local Speech talks to a local [llama.cpp](https://github.com/ggml-org/llama.cpp) HTTP server (`llama-server`) using Qwen3-ASR (`ggml-org/Qwen3-ASR-1.7B-GGUF`).
+Local Speech talks to a local [llama.cpp](https://github.com/ggml-org/llama.cpp) HTTP server (`llama-server`) using audio-capable GGUF models (via `-hf`).
 
 - If a compatible `llama-server` is already running, the app can reuse it (configurable preferred URL).
-- Otherwise it can start a managed server for you.
-- On first managed run, the model may be downloaded/loaded by `llama-server` (this can take time and requires network access once).
+- Otherwise it can start a managed server for you with the selected model.
+- On first run of a selected model, `llama-server` may download/load it (and its audio projector/mmproj) — this can take time and requires network access once. Cached models are reused locally.
+
+## Available models
+
+| Model | Quant | Download | Description |
+|---|---|---:|---|
+| **Qwen3-ASR 1.7B** | Q8_0 | ~2.4 GB | **Default · Best accuracy** — ~5.76 WER, 30 languages, auto language detection |
+| **Qwen3-ASR 0.6B** | Q8_0 | ~1.5 GB | **Fast · Lite** — smaller/faster, lower RAM, great for quick dictation |
+| **Voxtral Mini 3B** | Q4_K_M | ~2.5 GB | **Alternative engine** — Mistral Voxtral (Apache-2.0), solid transcription |
+| **Voxtral Mini 4B Realtime** | Q4_K_M | ~2.55 GB | **Newest · 13 languages** — streaming-native Voxtral (Feb 2026); requires a recent llama-server build |
+| **Voxtral Mini 4B Realtime** | Q8_0 | ~3.66 GB | **Higher fidelity** — higher-fidelity quant of Voxtral 4B Realtime; requires a recent llama-server build |
+
+> **Note:** Voxtral Mini 4B Realtime relies on newer llama.cpp/`llama-server` audio support. If your installed `llama-server` is too old, the app will report that the model is unsupported — update llama.cpp/llama-server or pick another model. Download status (“cached” vs “will download”) is shown in the model picker.
 
 ## Requirements
 
@@ -117,6 +130,7 @@ npx electron-builder --linux AppImage deb
 
 ## Usage tips
 
+- **Model selection:** in **Overview**, pick a Qwen3-ASR or Voxtral model and click **Apply model**. The managed server will (re)start with that model; if it’s not cached, `llama-server` downloads it first (progress appears in the server log). Switching stops/restarts the managed server, so stop any active listening/recording first.
 - **Live dictation:** choose chunking/VAD mode and language, start listening, and stop manually or let silence auto-stop (configurable). Hotkey-triggered live sessions can auto-paste on stop.
 - **Microphone / File:** record a take or pick an audio file to transcribe; results can be copied and are saved to local history.
 - **Tray:** closing the window hides the app to tray. Use the tray menu for **Show Local Speech**, **Start at login**, and **Exit**.

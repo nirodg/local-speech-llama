@@ -1,6 +1,6 @@
 {
   "name": "local-speech",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "private": true,
   "description": "Local speech-to-text app powered by llama.cpp (llama-server, Qwen3-ASR)",
   "main": "src/main.js",

@@ -51,10 +51,14 @@ function historyPath() { return path.join(app.getPath('userData'), 'history.json
 function ensureDir(p) { fs.mkdirSync(p, { recursive: true }); return p; }
 
 function loadConfig() {
-  const defaults = { autoCopy: false, autoPaste: false, globalHotkeyEnabled: false, globalHotkey: 'CommandOrControl+Alt+Space', llamaServerUrl: '', defaultLanguage: 'en', autoStopSeconds: 3, autoStart: false };
+  const defaults = { autoCopy: false, autoPaste: false, globalHotkeyEnabled: false, globalHotkey: 'CommandOrControl+Alt+Space', llamaServerUrl: '', defaultLanguage: 'en', autoStopSeconds: 3, autoStart: false, model: DEFAULT_MODEL_ID };
   try {
     const c = JSON.parse(fs.readFileSync(configPath(), 'utf8'));
-    return { ...defaults, ...c };
+    const merged = { ...defaults, ...c };
+    // migrate legacy/unset model to default id
+    if (!merged.model || (!findModelById(merged.model) && !findModelByHf(merged.model))) merged.model = DEFAULT_MODEL_ID;
+    if (findModelByHf(merged.model)) merged.model = findModelByHf(merged.model).id;
+    return merged;
   } catch {
     return { ...defaults };
   }
@@ -65,6 +69,24 @@ function loadHistory() { try { const h = JSON.parse(fs.readFileSync(historyPath(
 function saveHistory(items) { fs.mkdirSync(path.dirname(historyPath()), { recursive: true }); fs.writeFileSync(historyPath(), JSON.stringify(items.slice(0, 200), null, 2)); }
 function addHistory(entry) { const items = loadHistory(); items.unshift({ id: 'h-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7), at: new Date().toISOString(), ...entry }); saveHistory(items); return items; }
 
+const MODEL_CATALOG = [
+  { id: 'qwen3-asr-1.7b-q8_0', repo: 'ggml-org/Qwen3-ASR-1.7B-GGUF', quant: 'Q8_0', hf: 'ggml-org/Qwen3-ASR-1.7B-GGUF:Q8_0', label: 'Qwen3-ASR 1.7B', quantLabel: 'Q8_0', tag: 'Default · Best accuracy', description: 'Best accuracy in this range (~5.76 WER), 30 languages, auto language detection.', size: '~2.4 GB', recommended: true },
+  { id: 'qwen3-asr-0.6b-q8_0', repo: 'ggml-org/Qwen3-ASR-0.6B-GGUF', quant: 'Q8_0', hf: 'ggml-org/Qwen3-ASR-0.6B-GGUF:Q8_0', label: 'Qwen3-ASR 0.6B', quantLabel: 'Q8_0', tag: 'Fast · Lite', description: 'Smaller/faster, lower RAM; good for quick dictation.', size: '~1.5 GB' },
+  { id: 'voxtral-mini-3b-q4_k_m', repo: 'ggml-org/Voxtral-Mini-3B-2507-GGUF', quant: 'Q4_K_M', hf: 'ggml-org/Voxtral-Mini-3B-2507-GGUF:Q4_K_M', label: 'Voxtral Mini 3B', quantLabel: 'Q4_K_M', tag: 'Alternative engine', description: 'Mistral Voxtral, Apache-2.0, solid English/multilingual transcription.', size: '~2.5 GB' },
+  { id: 'voxtral-mini-4b-realtime-q4_k_m', repo: 'ggml-org/Voxtral-Mini-4B-Realtime-2602-GGUF', quant: 'Q4_K_M', hf: 'ggml-org/Voxtral-Mini-4B-Realtime-2602-GGUF:Q4_K_M', label: 'Voxtral Mini 4B Realtime', quantLabel: 'Q4_K_M', tag: 'Newest · 13 languages', description: 'Newer streaming-native Voxtral model (Feb 2026), 13 languages. Requires a recent llama-server build.', size: '~2.55 GB', requiresRecent: true },
+  { id: 'voxtral-mini-4b-realtime-q8_0', repo: 'ggml-org/Voxtral-Mini-4B-Realtime-2602-GGUF', quant: 'Q8_0', hf: 'ggml-org/Voxtral-Mini-4B-Realtime-2602-GGUF:Q8_0', label: 'Voxtral Mini 4B Realtime', quantLabel: 'Q8_0', tag: 'Higher fidelity', description: 'Higher-fidelity quant of Voxtral 4B Realtime. Requires a recent llama-server build.', size: '~3.66 GB', requiresRecent: true },
+];
+const DEFAULT_MODEL_ID = 'qwen3-asr-1.7b-q8_0';
+function findModelById(id) { return MODEL_CATALOG.find(m => m.id === id) || null; }
+function findModelByHf(hf) { return MODEL_CATALOG.find(m => m.hf === hf) || null; }
+function getSelectedModelId(cfg) {
+  const c = cfg || loadConfig();
+  if (c.model && findModelById(c.model)) return c.model;
+  if (c.model && findModelByHf(c.model)) return findModelByHf(c.model).id;
+  return DEFAULT_MODEL_ID;
+}
+function getSelectedModel(cfg) { return findModelById(getSelectedModelId(cfg)) || findModelById(DEFAULT_MODEL_ID); }
+
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
@@ -72,7 +94,7 @@ let widgetWindow = null;
 let listeningActive = false;
 let registeredHotkey = null;
 let hotkeyRegistration = { ok: false, registered: false, accelerator: null, error: null };
-let managedLlama = { proc: null, port: 8178, startedByApp: false, bin: null, model: 'ggml-org/Qwen3-ASR-1.7B-GGUF', url: null, log: '', lastEnsure: null };
+let managedLlama = { proc: null, port: 8178, startedByApp: false, bin: null, model: getSelectedModel().hf, url: null, log: '', lastEnsure: null };
 const SCAN_PORTS = [9931, 8080, 8178, 8081, 8082, 11434];
 
 function httpGetJson(url, timeoutMs = 1500) {
@@ -119,18 +141,56 @@ function findLlamaServerBin() {
   return findCmd(['llama-server']) || (fs.existsSync('/usr/local/lib/ollama/llama-server') ? '/usr/local/lib/ollama/llama-server' : null);
 }
 
-async function ensureManagedLlamaServer(onLine) {
+function getCachedModels() {
+  const bin = findLlamaServerBin();
+  if (!bin) return [];
+  try {
+    const r = spawnSync(bin, ['--cache-list'], { encoding: 'utf8', timeout: 10000 });
+    const out = (r.stdout || '') + '\n' + (r.stderr || '');
+    const names = [];
+    for (const line of out.split('\n')) {
+      const m = line.match(/^\s*\d+\.\s*(\S+)/);
+      if (m) names.push(m[1].trim());
+    }
+    return names;
+  } catch { return []; }
+}
+
+function isModelCached(hfSpec, cachedList) {
+  const list = cachedList || getCachedModels();
+  if (!list || !list.length) return false;
+  if (list.includes(hfSpec)) return true;
+  // accept repo-only match if quant unspecified in cache entry form variants
+  const repo = (hfSpec || '').split(':')[0];
+  return list.some(x => x === repo || x.startsWith(repo + ':'));
+}
+
+function getModelsInfo() {
+  const cached = getCachedModels();
+  const selected = getSelectedModel();
+  return {
+    selectedId: selected.id,
+    selectedHf: selected.hf,
+    catalog: MODEL_CATALOG.map(m => ({ ...m, cached: isModelCached(m.hf, cached) })),
+    cachedRaw: cached,
+  };
+}
+
+async function ensureManagedLlamaServer(onLine, opts = {}) {
   const bin = findLlamaServerBin();
   managedLlama.bin = bin;
-  // if already running anywhere, use it
-  const running = await detectRunningLlamaServer();
-  if (running.running) {
-    managedLlama.url = running.baseUrl;
-    if (!(managedLlama.proc && !managedLlama.proc.killed && managedLlama.startedByApp)) managedLlama.startedByApp = false;
-    return { ok: true, running: true, reused: true, baseUrl: running.baseUrl, bin, health: running.health || null };
+  managedLlama.model = getSelectedModel().hf;
+  if (!opts.forceManaged) {
+    // if already running anywhere, use it
+    const running = await detectRunningLlamaServer();
+    if (running.running) {
+      managedLlama.url = running.baseUrl;
+      if (!(managedLlama.proc && !managedLlama.proc.killed && managedLlama.startedByApp)) managedLlama.startedByApp = false;
+      return { ok: true, running: true, reused: true, baseUrl: running.baseUrl, bin, model: managedLlama.model, health: running.health || null };
+    }
   }
   if (managedLlama.proc && !managedLlama.proc.killed) {
-    // wait for readiness
+    // already starting/running managed - wait for readiness below
   } else {
     if (!bin) return { ok: false, running: false, error: 'llama-server binary not found (install llama.cpp / llama-server)', bin: null };
     const port = managedLlama.port;
@@ -138,21 +198,28 @@ async function ensureManagedLlamaServer(onLine) {
     onLine && onLine(`[llama-server] starting: ${bin} ${args.join(' ')}\n`);
     const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     managedLlama.proc = child; managedLlama.startedByApp = true; managedLlama.log = ''; managedLlama.url = `http://127.0.0.1:${port}`;
-    child.stdout.on('data', d => { managedLlama.log = (managedLlama.log + d.toString()).slice(-6000); });
-    child.stderr.on('data', d => { managedLlama.log = (managedLlama.log + d.toString()).slice(-6000); });
-    child.on('exit', (code) => { if (managedLlama.proc === child) { managedLlama.proc = null; managedLlama.startedByApp = false; } managedLlama.lastExit = code; });
+    child.stdout.on('data', d => { const t = d.toString(); managedLlama.log = (managedLlama.log + t).slice(-8000); onLine && onLine(t); });
+    child.stderr.on('data', d => { const t = d.toString(); managedLlama.log = (managedLlama.log + t).slice(-8000); onLine && onLine(t); });
+    child.on('exit', (code) => { if (managedLlama.proc === child) { managedLlama.proc = null; managedLlama.startedByApp = false; } managedLlama.lastExit = code; onLine && onLine(`[llama-server] exited (code ${code})\n`); });
   }
   const baseUrl = `http://127.0.0.1:${managedLlama.port}`;
   const start = Date.now();
-  const timeoutMs = 10 * 60 * 1000; // allow first-run model download
+  const timeoutMs = 15 * 60 * 1000; // allow first-run model download
   while (Date.now() - start < timeoutMs) {
     const r = await probeLlamaServer(baseUrl);
-    if (r.running) { managedLlama.url = baseUrl; return { ok: true, running: true, startedByApp: true, baseUrl, bin, pid: managedLlama.proc ? managedLlama.proc.pid : null }; }
+    if (r.running) { managedLlama.url = baseUrl; return { ok: true, running: true, startedByApp: managedLlama.startedByApp, baseUrl, bin, model: managedLlama.model, pid: managedLlama.proc ? managedLlama.proc.pid : null }; }
     if (managedLlama.proc && managedLlama.proc.exitCode != null) break;
     await new Promise(res => setTimeout(res, 1000));
   }
   const r = await probeLlamaServer(baseUrl);
-  return { ok: r.running, running: r.running, startedByApp: managedLlama.startedByApp, baseUrl, bin, pid: managedLlama.proc ? managedLlama.proc.pid : null, error: r.running ? null : 'llama-server not ready yet (it may still be downloading/loading the model)', logTail: managedLlama.log.slice(-1200) };
+  const logTail = managedLlama.log.slice(-2000);
+  let error = r.running ? null : 'llama-server not ready yet (it may still be downloading/loading the model)';
+  if (!r.running && /unknown model architecture|unsupported model|failed to load model|key not found|unknown argument/i.test(logTail)) {
+    error = 'Selected model may not be supported by your installed llama-server (architecture/loader mismatch) or the launch failed. Update llama.cpp / llama-server to a newer build, or choose another model.';
+  } else if (!r.running && managedLlama.proc && managedLlama.proc.exitCode != null) {
+    error = `llama-server exited (code ${managedLlama.proc.exitCode}) before becoming ready.`;
+  }
+  return { ok: r.running, running: r.running, startedByApp: managedLlama.startedByApp, baseUrl, bin, model: managedLlama.model, pid: managedLlama.proc ? managedLlama.proc.pid : null, error, logTail: managedLlama.log.slice(-1200) };
 }
 
 function stopManagedLlamaServer() {
@@ -230,6 +297,8 @@ async function getStatus() {
   const baseUrl = running.running ? running.baseUrl : (managedLlama.proc && !managedLlama.proc.killed ? managedLlama.url : null);
   let models = null;
   if (baseUrl) { const m = await httpGetJson(`${baseUrl.replace(/\/$/, '')}/v1/models`, 1200); if (m.ok) models = m.json; }
+  const selected = getSelectedModel(cfg);
+  const externalInUse = !!(running.running && !(managedLlama.proc && !managedLlama.proc.killed && managedLlama.startedByApp && managedLlama.url === running.baseUrl));
   return {
     offline: false,
     ffmpeg,
@@ -238,12 +307,14 @@ async function getStatus() {
       running: !!running.running || !!(managedLlama.proc && !managedLlama.proc.killed),
       baseUrl: baseUrl || null,
       managed: managedLlama.startedByApp && !!managedLlama.proc,
+      external: externalInUse,
       pid: managedLlama.proc ? managedLlama.proc.pid : null,
       model: managedLlama.model,
+      selectedModel: selected,
       models,
       logTail: managedLlama.log ? managedLlama.log.slice(-600) : '',
     },
-    config: { ...cfg, autoStart: isAutoStartEnabled() },
+    config: { ...cfg, autoStart: isAutoStartEnabled(), model: selected.id },
     hotkey: hotkeyRegistration,
     history: loadHistory(),
     version: app.getVersion(),
@@ -611,6 +682,25 @@ app.whenReady().then(() => {
     return { status: await getStatus(), hotkey };
   });
   ipcMain.handle('set-llama-url', async (_e, url) => { const cfg = loadConfig(); cfg.llamaServerUrl = (url || '').trim(); saveConfig(cfg); return await getStatus(); });
+  ipcMain.handle('get-models', async () => getModelsInfo());
+  ipcMain.handle('set-model', async (e, modelId) => {
+    if (listeningActive) return { ok: false, error: 'Cannot switch models while listening/recording is active. Stop first.', status: await getStatus(), models: getModelsInfo() };
+    const m = findModelById(modelId);
+    if (!m) return { ok: false, error: 'Unknown model selection.', status: await getStatus(), models: getModelsInfo() };
+    const cfg = loadConfig();
+    cfg.model = m.id;
+    // applying a managed model should use the managed server
+    cfg.llamaServerUrl = '';
+    saveConfig(cfg);
+    managedLlama.model = m.hf;
+    // restart managed server to apply new model
+    stopManagedLlamaServer();
+    // small delay to free port
+    await new Promise(res => setTimeout(res, 400));
+    const r = await ensureManagedLlamaServer((l) => { try { e.sender.send('transcribe-log', l); } catch {} }, { forceManaged: true });
+    managedLlama.lastEnsure = r;
+    return { ...r, status: await getStatus(), models: getModelsInfo() };
+  });
   ipcMain.handle('transcribe', async (e, payload) => {
     const { audioPath, language } = payload || {};
     const result = await transcribeWithLlama(audioPath, language, e.sender);

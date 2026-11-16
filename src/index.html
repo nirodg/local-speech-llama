@@ -74,12 +74,17 @@
             <div id="status" class="kv compact-kv">Loading…</div>
             <div class="panel-grid two" style="margin-top:10px">
               <div class="subcard">
-                <div class="subhead">Preferred server URL</div>
+                <div class="subhead">Model &amp; server</div>
                 <div class="actions wrap" style="margin:6px 0 0">
-                  <label class="inline grow">URL <input id="llama-url" class="mono" placeholder="e.g. http://127.0.0.1:9931 (optional)" /></label>
+                  <label class="inline grow">Model <select id="model-select"></select></label>
+                  <button id="apply-model-btn" class="secondary">Apply model</button>
+                </div>
+                <div id="model-desc" class="hint muted">Select a Qwen3-ASR or Voxtral model. If not cached, llama-server will download it on first start.</div>
+                <div class="actions wrap" style="margin:8px 0 0">
+                  <label class="inline grow">Preferred server URL <input id="llama-url" class="mono" placeholder="e.g. http://127.0.0.1:9931 (optional)" /></label>
                   <button id="save-url-btn" class="secondary">Save</button>
                 </div>
-                <div id="server-msg" class="hint">Managed model: <code>ggml-org/Qwen3-ASR-1.7B-GGUF</code> (downloaded/loaded on first run if needed).</div>
+                <div id="server-msg" class="hint">Managed server: auto-detects a running llama-server or starts one with the selected model.</div>
               </div>
               <div class="subcard">
                 <div class="subhead">Server log</div>

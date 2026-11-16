@@ -46,6 +46,27 @@ function appendServerLog(s){ const el=document.getElementById('server-log'); if(
 let flashTimer=null;
 function flash(msg){ let el=document.getElementById('toast'); if(!el){ el=document.createElement('div'); el.id='toast'; document.body.appendChild(el);} el.textContent=msg; el.className='toast show'; clearTimeout(flashTimer); flashTimer=setTimeout(()=>el.className='toast',1500); }
 
+function renderModels(){
+  const sel = document.getElementById('model-select');
+  const descEl = document.getElementById('model-desc');
+  if (!sel || !modelsInfo) return;
+  const current = modelsInfo.selectedId;
+  const prev = sel.value;
+  sel.innerHTML = (modelsInfo.catalog || []).map(m => {
+    const cached = m.cached ? '✓ cached' : `↓ ${m.size}`;
+    const label = `${m.label} · ${m.quantLabel} — ${m.tag} (${cached})`;
+    return `<option value="${esc(m.id)}">${esc(label)}</option>`;
+  }).join('');
+  sel.value = (modelsInfo.catalog || []).some(m => m.id === (prev || current)) ? (prev && prev !== '' ? prev : current) : current;
+  // if user hasn't manually changed selection, keep selected; if they had a different one selected keep it? better sync to current when not focused
+  if (document.activeElement !== sel) sel.value = current;
+  const chosen = (modelsInfo.catalog || []).find(m => m.id === sel.value) || (modelsInfo.catalog || []).find(m => m.id === current);
+  if (descEl && chosen) {
+    const cacheTxt = chosen.cached ? 'Downloaded/cached locally.' : `Not cached yet — will download on start (${chosen.size}).`;
+    descEl.textContent = `${chosen.description} ${cacheTxt}${chosen.requiresRecent ? ' Requires a recent llama-server build.' : ''}`;
+  }
+}
+
 function render(){
   const s = state || {}; const srv = s.server || {}; const cfg = s.config || {};
   const running = !!srv.running;
@@ -53,12 +74,14 @@ function render(){
   serverPill.textContent = running ? `Server: running (${srv.baseUrl||''})` : 'Server: not running';
   serverPill.className = 'pill ' + (running ? 'ok' : 'info');
   const modelNames = srv.models && (srv.models.data || srv.models.models) ? (srv.models.data||srv.models.models).map(m=>m.id||m.name||m.model).filter(Boolean).join(', ') : '—';
+  const selected = (srv.selectedModel) || (modelsInfo && (modelsInfo.catalog||[]).find(m=>m.id===modelsInfo.selectedId)) || null;
+  const targetModelTxt = selected ? `${selected.label} ${selected.quantLabel} (${selected.tag}) — ${selected.hf}` : (srv.model || '—');
   const rows = [
     ['llama-server binary', s.llamaServerBin || 'not found'],
     ['Server status', running ? 'running' : 'not running'],
     ['Server URL', srv.baseUrl || '—'],
-    ['Managed by app', srv.managed ? `yes${srv.pid?` (pid ${srv.pid})`:''}` : 'no (external or not started)'],
-    ['Target model (managed)', srv.model || 'ggml-org/Qwen3-ASR-1.7B-GGUF'],
+    ['Managed by app', srv.managed ? `yes${srv.pid?` (pid ${srv.pid})`:''}` : (srv.external ? 'no (external server in use)' : 'no (not started)')],
+    ['Selected model (managed)', targetModelTxt],
     ['Loaded/available models', modelNames],
     ['ffmpeg', s.ffmpeg || 'not found (mic/webm conversion may be limited)'],
     ['Platform', (s.platform||'') + ' ' + (s.arch||'')],
@@ -66,6 +89,7 @@ function render(){
   ];
   document.getElementById('status').innerHTML = rows.map(([k,v])=>`<div>${k}</div><div>${esc(v ?? '')}</div>`).join('');
   const urlInput = document.getElementById('llama-url'); if(urlInput && document.activeElement !== urlInput) urlInput.value = cfg.llamaServerUrl || '';
+  renderModels();
   const serverTxt = running ? (srv.baseUrl || 'running') : 'not running';
   for(const id of ['live-server','mic-server','file-server']){ const el=document.getElementById(id); if(el) el.textContent = serverTxt; }
   const autoCopy = document.getElementById('auto-copy'); if(autoCopy) autoCopy.checked = !!cfg.autoCopy;
@@ -119,7 +143,9 @@ document.getElementById('start-server-btn').addEventListener('click', async ()=>
   const msg=document.getElementById('server-msg'); if(msg) msg.textContent='Starting/checking llama-server (first run may download the model)…';
   document.getElementById('server-log').textContent='';
   const r = await window.offlineApi.ensureLlamaServer();
-  if(r && r.status) state=r.status; else await refresh(); render();
+  if(r && r.models) modelsInfo = r.models;
+  if(r && r.status) state=r.status; else await refresh();
+  render();
   if(msg) msg.textContent = r && r.ok ? `llama-server running at ${r.baseUrl||''}` : `llama-server: ${r.error||r.reason||'not ready'} (it may still be loading/downloading)`;
 });
 document.getElementById('stop-server-btn').addEventListener('click', async ()=>{
@@ -129,6 +155,28 @@ document.getElementById('stop-server-btn').addEventListener('click', async ()=>{
 document.getElementById('save-url-btn').addEventListener('click', async ()=>{
   const url = (document.getElementById('llama-url').value||'').trim();
   state = await window.offlineApi.setLlamaUrl(url); render(); flash(url ? 'Preferred server URL saved' : 'Preferred server URL cleared');
+});
+const modelSel = document.getElementById('model-select');
+if (modelSel) modelSel.addEventListener('change', ()=>{ renderModels(); });
+const applyModelBtn = document.getElementById('apply-model-btn');
+if (applyModelBtn) applyModelBtn.addEventListener('click', async ()=>{
+  const sel = document.getElementById('model-select');
+  const modelId = sel ? sel.value : null;
+  if (!modelId) return;
+  const msg=document.getElementById('server-msg');
+  document.getElementById('server-log').textContent='';
+  if(msg) msg.textContent='Applying model and (re)starting managed llama-server… first run may download the model.';
+  applyModelBtn.disabled = true;
+  try {
+    const r = await window.offlineApi.setModel(modelId);
+    if (r && r.models) modelsInfo = r.models; else { try { modelsInfo = await window.offlineApi.getModels(); } catch {} }
+    if (r && r.status) state = r.status; else await refresh();
+    render();
+    if (r && r.ok) { if(msg) msg.textContent = `Model applied. llama-server running at ${r.baseUrl||''}`; flash('Model applied'); }
+    else { if(msg) msg.textContent = `Model apply: ${r && r.error ? r.error : 'failed / not ready yet (check server log)'}`; flash(r && r.error ? r.error : 'Model apply failed'); }
+  } finally {
+    applyModelBtn.disabled = false;
+  }
 });
 
 // file transcription
