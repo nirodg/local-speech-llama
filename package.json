@@ -1,6 +1,6 @@
 {
   "name": "local-speech",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Local speech-to-text app powered by llama.cpp (llama-server, Qwen3-ASR)",
   "main": "src/main.js",
@@ -43,7 +43,12 @@
       "icon": "assets",
       "maintainer": "Local Speech <noreply@example.com>",
       "synopsis": "Local speech-to-text powered by llama.cpp",
-      "description": "Local speech-to-text desktop app powered by llama.cpp (llama-server, Qwen3-ASR)."
+      "description": "Local speech-to-text desktop app powered by llama.cpp (llama-server, Qwen3-ASR).",
+      "executableArgs": [
+        "--no-sandbox",
+        "--disable-gpu",
+        "--disable-dev-shm-usage"
+      ]
     }
   },
   "homepage": "https://github.com/nirodg/local-speech-llama",

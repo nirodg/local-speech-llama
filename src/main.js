@@ -1,5 +1,29 @@
 const { app, BrowserWindow, ipcMain, dialog, clipboard, globalShortcut, Tray, Menu, nativeImage, shell } = require('electron');
 app.setName('Local Speech');
+
+const _hasNoSandbox = process.argv.includes('--no-sandbox') || app.commandLine.hasSwitch('no-sandbox');
+const _hasDisableSandbox = process.argv.includes('--disable-setuid-sandbox') || app.commandLine.hasSwitch('disable-setuid-sandbox');
+if (!_hasNoSandbox) {
+  try { app.commandLine.appendSwitch('no-sandbox'); } catch {}
+  try { app.commandLine.appendSwitch('disable-gpu'); } catch {}
+  try { app.disableHardwareAcceleration(); } catch {}
+  // In some environments sandbox mode is decided very early; if we're in the main process, relaunch once with flags.
+  if (process.type === 'browser' && !process.env.LOCAL_SPEECH_RELAUNCHED) {
+    try {
+      const { spawn } = require('child_process');
+      const args = process.argv.slice(1).filter(a => a !== '--no-sandbox' && a !== '--disable-gpu');
+      args.push('--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage');
+      const child = spawn(process.execPath, args, {
+        detached: true,
+        stdio: 'ignore',
+        env: { ...process.env, LOCAL_SPEECH_RELAUNCHED: '1' },
+      });
+      child.unref();
+      app.exit(0);
+    } catch {}
+  }
+}
+
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
