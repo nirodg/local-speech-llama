@@ -1,0 +1,58 @@
+{
+  "name": "local-speech",
+  "version": "0.2.1",
+  "private": true,
+  "description": "Local speech-to-text app powered by llama.cpp (llama-server, Qwen3-ASR)",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron . --no-sandbox --disable-gpu",
+    "start:sandbox": "electron .",
+    "dist": "electron-builder --linux",
+    "dist:appimage": "electron-builder --linux AppImage",
+    "dist:deb": "electron-builder --linux deb"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "productName": "Local Speech",
+  "build": {
+    "appId": "io.local.speech",
+    "productName": "Local Speech",
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "assets",
+        "to": "assets"
+      }
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "AudioVideo;Utility;",
+      "icon": "assets",
+      "maintainer": "Local Speech <noreply@example.com>",
+      "synopsis": "Local speech-to-text powered by llama.cpp",
+      "description": "Local speech-to-text desktop app powered by llama.cpp (llama-server, Qwen3-ASR)."
+    }
+  },
+  "homepage": "https://github.com/nirodg/local-speech-llama",
+  "author": {
+    "name": "Local Speech",
+    "email": "noreply@example.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nirodg/local-speech-llama.git"
+  }
+}

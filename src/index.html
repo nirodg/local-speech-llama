@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Local Speech</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand drag">
+        <div class="brand-mark"><img src="../assets/icon.svg" alt="" /></div>
+        <div class="brand-text">
+          <div class="brand-name">Local Speech</div>
+          <div class="brand-sub">Offline llama.cpp STT</div>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="Primary">
+        <button class="nav-item active" data-nav="overview"><span class="nav-dot"></span><span>Overview</span></button>
+        <button class="nav-item" data-nav="live"><span class="nav-dot"></span><span>Live</span></button>
+        <button class="nav-item" data-nav="mic"><span class="nav-dot"></span><span>Microphone</span></button>
+        <button class="nav-item" data-nav="file"><span class="nav-dot"></span><span>Audio File</span></button>
+        <button class="nav-item" data-nav="history"><span class="nav-dot"></span><span>History &amp; Settings</span></button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="sidebar-box">
+          <div class="sidebar-label">Engine</div>
+          <div class="sidebar-pill"><code>Qwen3-ASR-1.7B</code></div>
+          <div class="sidebar-note">Managed <code>llama-server</code> auto-starts if needed.</div>
+        </div>
+        <div class="sidebar-box credit-box">
+          Made with &lt;3 by <a href="https://github.com/nirodg" target="_blank" rel="noopener noreferrer">Brage Dorin</a>
+        </div>
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="titlebar drag">
+        <div class="titlebar-left">
+          <div id="page-title" class="page-title">Overview</div>
+          <div id="page-subtitle" class="page-subtitle">Server status and controls</div>
+        </div>
+        <div class="titlebar-right no-drag">
+          <div id="server-pill" class="pill info">Server: …</div>
+          <div class="window-controls" aria-label="Window controls">
+            <button id="win-minimize" class="wc-btn wc-hide" title="Hide" aria-label="Hide"></button>
+            <button id="win-close" class="wc-btn wc-close" title="Close" aria-label="Close"></button>
+          </div>
+        </div>
+      </header>
+
+      <main class="content">
+        <section class="page active" data-page="overview">
+          <div class="hero-card compact-hero">
+            <div>
+              <div class="eyebrow">Private, local speech-to-text</div>
+              <h1>Local transcription with llama.cpp</h1>
+              <p class="hero-copy">Runs on your machine using <code>llama-server</code> and <code>ggml-org/Qwen3-ASR-1.7B-GGUF</code>. Reuses a running server or starts a managed one automatically.</p>
+            </div>
+          </div>
+
+          <section class="card">
+            <div class="card-head">
+              <h2>Server status</h2>
+              <div class="card-actions actions wrap" style="margin:0">
+                <button id="refresh-btn" class="secondary">Refresh</button>
+                <button id="start-server-btn" class="secondary">Start / check</button>
+                <button id="stop-server-btn" class="secondary">Stop managed</button>
+              </div>
+            </div>
+            <div id="status" class="kv compact-kv">Loading…</div>
+            <div class="panel-grid two" style="margin-top:10px">
+              <div class="subcard">
+                <div class="subhead">Preferred server URL</div>
+                <div class="actions wrap" style="margin:6px 0 0">
+                  <label class="inline grow">URL <input id="llama-url" class="mono" placeholder="e.g. http://127.0.0.1:9931 (optional)" /></label>
+                  <button id="save-url-btn" class="secondary">Save</button>
+                </div>
+                <div id="server-msg" class="hint">Managed model: <code>ggml-org/Qwen3-ASR-1.7B-GGUF</code> (downloaded/loaded on first run if needed).</div>
+              </div>
+              <div class="subcard">
+                <div class="subhead">Server log</div>
+                <pre id="server-log" class="output log compact">Server log/output will appear here when starting.</pre>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section class="page" data-page="live">
+          <section class="card">
+            <div class="card-head tight">
+              <div>
+                <h2>Live dictation</h2>
+                <p class="card-desc">Chunked transcription with auto-stop on silence.</p>
+              </div>
+            </div>
+            <div class="workspace">
+              <div class="workspace-main">
+                <div class="toolbar">
+                  <button id="live-start-btn" class="primary">▶ Start</button>
+                  <button id="live-stop-btn" class="secondary" disabled>■ Stop</button>
+                  <span id="live-timer" class="mono muted timer-chip">00:00</span>
+                  <label class="inline">Chunk
+                    <select id="live-chunk-sec"><option value="4">4s</option><option value="6" selected>6s</option><option value="8">8s</option><option value="vad">Auto (VAD)</option></select>
+                  </label>
+                  <label class="inline">Lang
+                    <select id="live-lang"><option value="auto">auto</option><option value="en">en</option><option value="ro">ro</option><option value="de">de</option><option value="fr">fr</option><option value="es">es</option><option value="it">it</option><option value="pt">pt</option><option value="nl">nl</option><option value="pl">pl</option><option value="uk">uk</option><option value="ru">ru</option></select>
+                  </label>
+                  <span id="live-vad" class="mono muted vad-chip">VAD: —</span>
+                </div>
+                <div class="meta-strip kv small compact-kv">
+                  <div>State</div><div id="live-state" class="mono muted">idle</div>
+                  <div>Chunks</div><div id="live-chunks" class="mono muted">0</div>
+                  <div>Server</div><div id="live-server" class="mono muted">—</div>
+                </div>
+                <div id="live-status" class="run-status muted">Records in chunks and transcribes via llama-server; auto-stops after silence.</div>
+                <div class="subhead row-between" style="margin-top:8px"><span>Live transcript</span><button id="copy-live-btn" class="secondary smallbtn">Copy</button></div>
+                <pre id="live-transcript" class="output transcript">(no live transcript yet)</pre>
+              </div>
+              <div class="workspace-side">
+                <div class="subhead">Live log</div>
+                <pre id="live-log" class="output log">Ready.</pre>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section class="page" data-page="mic">
+          <section class="card">
+            <div class="card-head tight">
+              <div>
+                <h2>Microphone dictation</h2>
+                <p class="card-desc">Record a take, then transcribe in one go.</p>
+              </div>
+            </div>
+            <div class="workspace">
+              <div class="workspace-main">
+                <div class="toolbar">
+                  <button id="mic-record-btn" class="primary">● Record</button>
+                  <button id="mic-stop-btn" class="secondary" disabled>■ Stop &amp; transcribe</button>
+                  <span id="mic-timer" class="mono muted timer-chip">00:00</span>
+                  <label class="inline">Lang <select id="mic-lang"><option value="auto">auto</option><option value="en">en</option><option value="ro">ro</option><option value="de">de</option><option value="fr">fr</option><option value="es">es</option><option value="it">it</option><option value="pt">pt</option><option value="nl">nl</option><option value="pl">pl</option><option value="uk">uk</option><option value="ru">ru</option></select></label>
+                </div>
+                <div class="meta-strip kv small compact-kv">
+                  <div>State</div><div id="mic-state" class="mono muted">idle</div>
+                  <div>Last file</div><div id="mic-file" class="mono muted">(not stored)</div>
+                  <div>Server</div><div id="mic-server" class="mono muted">—</div>
+                </div>
+                <div id="mic-status" class="run-status muted">Record, then stop to transcribe via llama-server.</div>
+                <div class="subhead row-between" style="margin-top:8px"><span>Mic transcript</span><button id="copy-mic-btn" class="secondary smallbtn">Copy</button></div>
+                <pre id="mic-transcript" class="output transcript">(no transcript yet)</pre>
+              </div>
+              <div class="workspace-side">
+                <div class="subhead">Mic log</div>
+                <pre id="mic-log" class="output log">Ready.</pre>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section class="page" data-page="file">
+          <section class="card">
+            <div class="card-head tight">
+              <div>
+                <h2>Transcribe audio file</h2>
+                <p class="card-desc">Select a local audio file and transcribe it.</p>
+              </div>
+            </div>
+            <div class="workspace">
+              <div class="workspace-main">
+                <div class="toolbar">
+                  <button id="pick-audio-btn" class="secondary">Choose file…</button>
+                  <label class="inline">Lang <select id="lang"><option value="auto">auto</option><option value="en">en</option><option value="ro">ro</option><option value="de">de</option><option value="fr">fr</option><option value="es">es</option><option value="it">it</option><option value="pt">pt</option><option value="nl">nl</option><option value="pl">pl</option><option value="uk">uk</option><option value="ru">ru</option></select></label>
+                  <button id="run-btn" class="primary">Transcribe</button>
+                </div>
+                <div class="meta-strip kv small compact-kv">
+                  <div>Audio</div><div id="audio-path" class="mono muted">(none)</div>
+                  <div>Server</div><div id="file-server" class="mono muted">—</div>
+                </div>
+                <div id="run-status" class="run-status muted">Select an audio file and transcribe via llama-server.</div>
+                <div class="subhead row-between" style="margin-top:8px"><span>Transcript</span><button id="copy-file-btn" class="secondary smallbtn">Copy</button></div>
+                <pre id="transcript" class="output transcript">(no transcript yet)</pre>
+              </div>
+              <div class="workspace-side">
+                <div class="subhead">Log</div>
+                <pre id="log" class="output log">Ready.</pre>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section class="page" data-page="history">
+          <div class="panel-grid two compact-grid">
+            <section class="card">
+              <div class="card-head tight"><h2>Defaults &amp; controls</h2></div>
+              <div class="subcard" style="margin-bottom:8px">
+                <div class="subhead">Defaults</div>
+                <div class="actions wrap" style="margin:6px 0 0">
+                  <label class="inline">Default language
+                    <select id="default-language">
+                      <option value="en">en (English)</option>
+                      <option value="auto">auto</option><option value="ro">ro</option><option value="de">de</option><option value="fr">fr</option><option value="es">es</option><option value="it">it</option><option value="pt">pt</option><option value="nl">nl</option><option value="pl">pl</option><option value="uk">uk</option><option value="ru">ru</option>
+                    </select>
+                  </label>
+                  <label class="inline">Auto-stop silence (sec)
+                    <input id="auto-stop-seconds" type="number" min="1" max="60" step="1" value="3" class="mono" style="width:80px" />
+                  </label>
+                  <label class="inline"><input type="checkbox" id="auto-start" /> Start at login</label>
+                </div>
+              </div>
+              <div class="subcard" style="margin-bottom:8px">
+                <div class="subhead">Clipboard</div>
+                <div class="actions wrap" style="margin:6px 0 0">
+                  <label class="inline"><input type="checkbox" id="auto-copy" /> Auto-copy</label>
+                  <label class="inline"><input type="checkbox" id="auto-paste" /> Auto-paste</label>
+                </div>
+              </div>
+              <div class="subcard">
+                <div class="subhead">Global hotkey</div>
+                <div class="actions wrap" style="margin:6px 0 0">
+                  <label class="inline"><input type="checkbox" id="hotkey-enabled" /> Enable</label>
+                  <input id="hotkey-accel" class="mono" style="min-width:180px;flex:1" value="CommandOrControl+Alt+Space" />
+                  <button id="hotkey-apply-btn" class="secondary">Apply</button>
+                </div>
+                <div style="margin-top:6px"><span id="hotkey-status" class="hint" style="margin:0">Disabled</span></div>
+                <p class="hint">Hotkey toggles live and auto-pastes on stop when hotkey-triggered. Shortcuts: <code>Ctrl+Shift+M</code> mic, <code>Ctrl+Shift+K</code> copy mic.</p>
+              </div>
+            </section>
+
+            <section class="card">
+              <div class="card-head tight">
+                <h2>History</h2>
+                <div class="card-actions actions wrap" style="margin:0"><button id="clear-history-btn" class="secondary">Clear</button></div>
+              </div>
+              <p class="hint" style="margin:0 0 8px">Stored locally (last 200). Audio recordings are not stored.</p>
+              <div id="history-list" class="history-list"></div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
