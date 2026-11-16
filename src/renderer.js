@@ -8,6 +8,29 @@ let unlog = null, micUnlog = null;
 let defaultsApplied = false;
 // mic
 let mediaRecorder=null, micChunks=[], micStream=null, micStartAt=0, micTimerInt=null;
+let micAudioCtx=null, micAnalyser=null, micLevelInt=null, micLastSpeaking=false;
+function cleanupMicMonitor(){
+  if(micLevelInt){ clearInterval(micLevelInt); micLevelInt=null; }
+  if(micAudioCtx){ try{ micAudioCtx.close(); }catch(e){} micAudioCtx=null; }
+  micAnalyser=null; micLastSpeaking=false;
+}
+function startMicMonitor(stream){
+  cleanupMicMonitor();
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext; micAudioCtx = new Ctx();
+    const src = micAudioCtx.createMediaStreamSource(stream); micAnalyser = micAudioCtx.createAnalyser(); micAnalyser.fftSize = 2048; src.connect(micAnalyser);
+    const buf = new Uint8Array(micAnalyser.fftSize);
+    micLevelInt = setInterval(()=>{
+      if(!micAnalyser) return;
+      micAnalyser.getByteTimeDomainData(buf); let sum=0; for(let i=0;i<buf.length;i++){ const v=(buf[i]-128)/128; sum+=v*v; } const rms = Math.sqrt(sum/buf.length);
+      const speaking = rms > 0.02; micLastSpeaking = speaking;
+      const level = Math.max(0.03, Math.min(1, rms * 8));
+      try { window.offlineApi.sendListeningLevel({ level, speaking, source: 'mic' }); } catch {}
+    }, 100);
+  } catch(e){ appendMicLog(`\n[mic] level monitor unavailable: ${e.message}\n`); }
+}
+
+
 // live
 let liveStream=null, liveRecorder=null, liveRunning=false, liveStopping=false, liveChunksDone=0, liveSeq=0, liveStartAt=0, liveTimerInt=null, liveQueue=[], liveProcessing=false, liveFullText='', liveChunkMs=6000, liveMode='fixed', liveAudioCtx=null, liveAnalyser=null, liveVadInt=null, liveSpeechSeen=false, liveLastVoiceAt=0, liveChunkStartedAt=0, liveStartedByHotkey=false, pendingHotkeyLive=false, liveSessionSpeechSeen=false, liveSessionLastVoiceAt=0, liveChunkSpeechSeen=false, liveAutoStopTriggered=false;
 
@@ -134,12 +157,16 @@ recBtn.addEventListener('click', async ()=>{
   micChunks = [];
   const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : (MediaRecorder.isTypeSupported('audio/webm')?'audio/webm':'');
   mediaRecorder = new MediaRecorder(micStream, mime?{mimeType:mime}:undefined);
+  startMicMonitor(micStream);
+  try { window.offlineApi.setListeningState({ active: true, label: 'Recording', sub: 'Microphone active', source: 'mic' }); } catch {}
   mediaRecorder.ondataavailable = e => { if(e.data && e.data.size) micChunks.push(e.data); };
   mediaRecorder.onstop = async ()=>{
     clearInterval(micTimerInt); micTimerInt=null;
+    cleanupMicMonitor();
+    try { window.offlineApi.setListeningState({ active: false }); } catch {}
     const blob = new Blob(micChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
     const buf = await blob.arrayBuffer();
-    micStream.getTracks().forEach(t=>t.stop()); micStream=null;
+    if (micStream) { try { micStream.getTracks().forEach(t=>t.stop()); } catch {} micStream=null; }
     document.getElementById('mic-state').textContent='processing…';
     setMicStatus(`Recorded ${fmtBytes(buf.byteLength)}. Transcribing via llama-server…`, '');
     document.getElementById('mic-log').textContent=''; document.getElementById('mic-transcript').textContent='(transcribing…)';
@@ -158,7 +185,7 @@ recBtn.addEventListener('click', async ()=>{
   appendMicLog('\n[mic] recording started\n'); recBtn.disabled=true; stopBtn.disabled=false;
   micTimerInt=setInterval(()=>{ document.getElementById('mic-timer').textContent = fmtTime(Date.now()-micStartAt); }, 200);
 });
-stopBtn.addEventListener('click', ()=>{ if(mediaRecorder && mediaRecorder.state!=='inactive'){ mediaRecorder.stop(); document.getElementById('mic-state').textContent='stopping…'; } });
+stopBtn.addEventListener('click', ()=>{ if(mediaRecorder && mediaRecorder.state!=='inactive'){ try { window.offlineApi.setListeningState({ active: false }); } catch {} cleanupMicMonitor(); mediaRecorder.stop(); document.getElementById('mic-state').textContent='stopping…'; } });
 
 // live
 function cleanupLiveAudio(){ if(liveVadInt){ clearInterval(liveVadInt); liveVadInt=null; } if(liveAudioCtx){ try{ liveAudioCtx.close(); }catch(e){} liveAudioCtx=null; } liveAnalyser=null; liveSpeechSeen=false; liveLastVoiceAt=0; liveSessionSpeechSeen=false; liveSessionLastVoiceAt=0; liveChunkSpeechSeen=false; liveAutoStopTriggered=false; const v=document.getElementById('live-vad'); if(v) v.textContent='VAD: —'; }
@@ -177,6 +204,8 @@ function startVadMonitor(){
       const speaking = rms > 0.02; const now = Date.now();
       if(speaking){ liveSpeechSeen=true; liveChunkSpeechSeen=true; liveSessionSpeechSeen=true; liveLastVoiceAt=now; liveSessionLastVoiceAt=now; }
       const v=document.getElementById('live-vad'); if(v) v.textContent = speaking ? `VAD: speech (${rms.toFixed(3)})` : `VAD: silence (${rms.toFixed(3)})`;
+      const level = Math.max(0.03, Math.min(1, rms * 8));
+      try { window.offlineApi.sendListeningLevel({ level, speaking, source: 'live' }); } catch {}
 
       if(liveMode==='vad' && liveRecorder && liveRecorder.state==='recording'){
         const dur = now - liveChunkStartedAt; const silenceMs = now - liveLastVoiceAt;
@@ -220,6 +249,7 @@ async function processLiveQueue(){
   if(liveRunning && !liveStopping){ document.getElementById('live-state').textContent='recording'; const stopSec = Math.max(1, Number(((state && state.config) || {}).autoStopSeconds) || 3); const modeNote = liveMode==='vad' ? 'auto chunking on silence' : `chunked every ${Math.round(liveChunkMs/1000)}s`; setLiveStatus(`Listening… ${modeNote}. Auto-stops after ${stopSec}s of silence.`, ''); }
   else if(!liveRunning && liveQueue.length===0){
     if(liveStream){ try{ liveStream.getTracks().forEach(t=>t.stop()); }catch(e){} liveStream=null; } liveStopping=false;
+    try { window.offlineApi.setListeningState({ active: false }); } catch {}
     document.getElementById('live-state').textContent='idle';
     const finalText = liveFullText.trim();
     if(finalText){
@@ -273,11 +303,13 @@ liveStartBtn.addEventListener('click', async ()=>{
   setLiveStatus(`Listening… ${modeNote}. Auto-stops after ${stopSec}s of silence.`, ''); appendLiveLog(`[live] started${liveStartedByHotkey ? ' (hotkey)' : ''}\n`);
   liveStartAt=Date.now(); document.getElementById('live-timer').textContent='00:00'; liveTimerInt=setInterval(()=>{ document.getElementById('live-timer').textContent = fmtTime(Date.now()-liveStartAt); }, 200);
   liveStartBtn.disabled=true; liveStopBtn.disabled=false; startVadMonitor(); startLiveChunk();
+  try { window.offlineApi.setListeningState({ active: true, label: 'Live dictation', sub: 'Microphone active', source: 'live' }); } catch {}
 });
 liveStopBtn.addEventListener('click', ()=>{
   liveRunning=false; liveStopping=true; if(liveTimerInt){ clearInterval(liveTimerInt); liveTimerInt=null; }
   document.getElementById('live-state').textContent='stopping…'; setLiveStatus('Stopping… finishing current chunk.', ''); appendLiveLog('\n[live] stop requested\n');
   liveStartBtn.disabled=false; liveStopBtn.disabled=true; cleanupLiveAudio();
+  try { window.offlineApi.setListeningState({ active: false }); } catch {}
   if(liveRecorder && liveRecorder.state!=='inactive'){ try{ liveRecorder.stop(); }catch(e){} } else { if(liveStream){ liveStream.getTracks().forEach(t=>t.stop()); liveStream=null; } processLiveQueue(); }
   setTimeout(()=>{ if(liveStream){ liveStream.getTracks().forEach(t=>t.stop()); liveStream=null; } }, 1500);
 });

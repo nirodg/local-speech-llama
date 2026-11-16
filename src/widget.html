@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Listening</title>
+  <style>
+    html, body { margin:0; padding:0; width:100%; height:100%; background:transparent; overflow:hidden; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    body { -webkit-app-region: drag; }
+    .wrap {
+      box-sizing: border-box;
+      width: 100%; height: 100%;
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(15, 23, 42, 0.92);
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+      color: #e5e7eb;
+    }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #22c55e;
+      box-shadow: 0 0 0 0 rgba(34,197,94,0.7);
+      animation: pulse 1.4s infinite;
+      flex: 0 0 auto;
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(34,197,94,0.7); }
+      70% { box-shadow: 0 0 0 8px rgba(34,197,94,0); }
+      100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
+    }
+    .bars { display:flex; align-items:flex-end; gap:3px; height:28px; flex:0 0 auto; }
+    .bar {
+      width:4px; height:6px; border-radius:2px;
+      background: linear-gradient(180deg, #60a5fa, #22c55e);
+      opacity: 0.95;
+      transition: height 60ms linear, opacity 80ms linear;
+    }
+    .text { display:flex; flex-direction:column; line-height:1.1; min-width:0; }
+    .label { font-size:12px; font-weight:600; white-space:nowrap; }
+    .sub { font-size:10px; color:#94a3b8; white-space:nowrap; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="dot"></div>
+    <div class="bars" id="bars"></div>
+    <div class="text">
+      <div class="label" id="label">Listening</div>
+      <div class="sub" id="sub">Microphone active</div>
+    </div>
+  </div>
+  <script>
+    const barsEl = document.getElementById('bars');
+    const labelEl = document.getElementById('label');
+    const subEl = document.getElementById('sub');
+    const N = 12;
+    const bars = [];
+    let smooth = new Array(N).fill(0.08);
+    for (let i = 0; i < N; i++) { const b = document.createElement('div'); b.className = 'bar'; barsEl.appendChild(b); bars.push(b); }
+    function render(level, speaking) {
+      const base = Math.max(0, Math.min(1, Number(level) || 0));
+      for (let i = 0; i < N; i++) {
+        const center = (N - 1) / 2;
+        const dist = Math.abs(i - center) / center;
+        const shape = 1 - dist * 0.55;
+        const wobble = 0.85 + Math.random() * 0.3;
+        const target = Math.max(0.06, Math.min(1, base * shape * wobble * (speaking ? 1.15 : 0.75)));
+        smooth[i] = smooth[i] * 0.7 + target * 0.3;
+        const h = 4 + smooth[i] * 22;
+        bars[i].style.height = h + 'px';
+        bars[i].style.opacity = speaking ? (0.75 + smooth[i] * 0.25) : (0.45 + smooth[i] * 0.25);
+      }
+      subEl.textContent = speaking ? 'Voice detected' : 'Microphone active';
+    }
+    render(0.05, false);
+    if (window.widgetApi) {
+      window.widgetApi.onLevel((data) => { const d = data || {}; render(d.level || 0, !!d.speaking); });
+      window.widgetApi.onState((data) => { const d = data || {}; labelEl.textContent = d.label || 'Listening'; subEl.textContent = d.sub || 'Microphone active'; if (typeof d.level === 'number') render(d.level, !!d.speaking); });
+    }
+  </script>
+</body>
+</html>

@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld('offlineApi', {
   setLlamaUrl: (url) => ipcRenderer.invoke('set-llama-url', url),
   windowMinimize: () => ipcRenderer.invoke('window-minimize'),
   windowClose: () => ipcRenderer.invoke('window-close'),
+  setListeningState: (payload) => ipcRenderer.invoke('listening-state', payload),
+  sendListeningLevel: (payload) => ipcRenderer.invoke('listening-level', payload),
   onTranscribeLog: (cb) => { const h = (_e, line) => cb(line); ipcRenderer.on('transcribe-log', h); return () => ipcRenderer.removeListener('transcribe-log', h); },
   onGlobalHotkeyToggle: (cb) => { const h = () => cb(); ipcRenderer.on('global-hotkey-toggle', h); return () => ipcRenderer.removeListener('global-hotkey-toggle', h); },
 });

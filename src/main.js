@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, clipboard, globalShortcut, Tray, Menu, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, clipboard, globalShortcut, Tray, Menu, nativeImage, shell, screen } = require('electron');
 app.setName('Local Speech');
 
 const _hasNoSandbox = process.argv.includes('--no-sandbox') || app.commandLine.hasSwitch('no-sandbox');
@@ -68,6 +68,8 @@ function addHistory(entry) { const items = loadHistory(); items.unshift({ id: 'h
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
+let widgetWindow = null;
+let listeningActive = false;
 let registeredHotkey = null;
 let hotkeyRegistration = { ok: false, registered: false, accelerator: null, error: null };
 let managedLlama = { proc: null, port: 8178, startedByApp: false, bin: null, model: 'ggml-org/Qwen3-ASR-1.7B-GGUF', url: null, log: '', lastEnsure: null };
@@ -441,6 +443,84 @@ function createTray() {
   return tray;
 }
 
+
+function isMainWindowVisible() {
+  try { return !!(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized()); } catch { return false; }
+}
+
+function positionWidgetWindow() {
+  if (!widgetWindow || widgetWindow.isDestroyed()) return;
+  try {
+    const display = screen.getPrimaryDisplay();
+    const wa = (display && display.workArea) ? display.workArea : { x: 0, y: 0, width: 1280, height: 720 };
+    const b = widgetWindow.getBounds();
+    const x = Math.round(wa.x + wa.width - b.width - 20);
+    const y = Math.round(wa.y + wa.height - b.height - 20);
+    widgetWindow.setPosition(x, y, false);
+  } catch {}
+}
+
+function createWidgetWindow() {
+  if (widgetWindow && !widgetWindow.isDestroyed()) return widgetWindow;
+  widgetWindow = new BrowserWindow({
+    width: 220,
+    height: 54,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: true,
+    minimizable: false,
+    maximizable: false,
+    closable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    focusable: false,
+    hasShadow: false,
+    show: false,
+    backgroundColor: '#00000000',
+    webPreferences: {
+      preload: path.join(__dirname, 'widget-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  try { widgetWindow.setAlwaysOnTop(true, 'screen-saver'); } catch {}
+  try { widgetWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch {}
+  widgetWindow.loadFile(path.join(__dirname, 'widget.html'));
+  widgetWindow.on('closed', () => { widgetWindow = null; });
+  positionWidgetWindow();
+  return widgetWindow;
+}
+
+function updateWidgetVisibility() {
+  try {
+    if (!listeningActive) {
+      if (widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.hide();
+      return;
+    }
+    if (isMainWindowVisible()) {
+      if (widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.hide();
+      return;
+    }
+    const w = createWidgetWindow();
+    if (!w || w.isDestroyed()) return;
+    positionWidgetWindow();
+    if (!w.isVisible()) w.showInactive();
+  } catch {}
+}
+
+function sendWidgetState(payload) {
+  if (widgetWindow && !widgetWindow.isDestroyed()) {
+    try { widgetWindow.webContents.send('widget-state', payload || {}); } catch {}
+  }
+}
+function sendWidgetLevel(payload) {
+  if (widgetWindow && !widgetWindow.isDestroyed()) {
+    try { widgetWindow.webContents.send('widget-level', payload || {}); } catch {}
+  }
+}
+
+
 function createWindow() {
   const appIcon = getAppIcon();
   const win = new BrowserWindow({
@@ -469,6 +549,12 @@ function createWindow() {
   win.webContents.on('will-navigate', (e, url) => {
     if (url !== win.webContents.getURL()) { e.preventDefault(); try { if (/^https?:/i.test(url)) shell.openExternal(url); } catch {} }
   });
+  win.on('minimize', () => updateWidgetVisibility());
+  win.on('restore', () => updateWidgetVisibility());
+  win.on('show', () => updateWidgetVisibility());
+  win.on('hide', () => updateWidgetVisibility());
+  win.on('focus', () => updateWidgetVisibility());
+  win.on('blur', () => updateWidgetVisibility());
   win.loadFile(path.join(__dirname, 'index.html'));
   mainWindow = win;
   return win;
@@ -478,6 +564,20 @@ app.whenReady().then(() => {
   cleanupOldRecordings();
   ipcMain.handle('window-minimize', (e) => { const w = BrowserWindow.fromWebContents(e.sender); if (w) w.minimize(); return { ok: true }; });
   ipcMain.handle('window-close', (e) => { const w = BrowserWindow.fromWebContents(e.sender); if (w) w.close(); return { ok: true }; });
+  ipcMain.handle('listening-state', (_e, payload) => {
+    const p = payload || {};
+    listeningActive = !!p.active;
+    if (listeningActive) {
+      sendWidgetState({ label: p.label || 'Listening', sub: p.sub || 'Microphone active', level: 0.05, speaking: false });
+    }
+    updateWidgetVisibility();
+    return { ok: true };
+  });
+  ipcMain.handle('listening-level', (_e, payload) => {
+    if (!listeningActive) return { ok: false };
+    sendWidgetLevel(payload || {});
+    return { ok: true };
+  });
   ipcMain.handle('get-status', async () => await getStatus());
   ipcMain.handle('ensure-llama-server', async (e) => { const r = await ensureManagedLlamaServer((l) => { try { e.sender.send('transcribe-log', l); } catch {} }); managedLlama.lastEnsure = r; return { ...r, status: await getStatus() }; });
   ipcMain.handle('stop-llama-server', async () => { stopManagedLlamaServer(); return { ok: true, status: await getStatus() }; });
