@@ -46,9 +46,11 @@
       "description": "Local speech-to-text desktop app powered by llama.cpp (llama-server, Qwen3-ASR).",
       "executableArgs": [
         "--no-sandbox",
+        "--disable-setuid-sandbox",
         "--disable-gpu",
         "--disable-dev-shm-usage"
-      ]
+      ],
+      "executableName": "local-speech"
     }
   },
   "homepage": "https://github.com/nirodg/local-speech-llama",

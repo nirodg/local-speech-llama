@@ -5,14 +5,16 @@ const _hasNoSandbox = process.argv.includes('--no-sandbox') || app.commandLine.h
 const _hasDisableSandbox = process.argv.includes('--disable-setuid-sandbox') || app.commandLine.hasSwitch('disable-setuid-sandbox');
 if (!_hasNoSandbox) {
   try { app.commandLine.appendSwitch('no-sandbox'); } catch {}
+  try { app.commandLine.appendSwitch('disable-setuid-sandbox'); } catch {}
   try { app.commandLine.appendSwitch('disable-gpu'); } catch {}
+  try { app.commandLine.appendSwitch('disable-dev-shm-usage'); } catch {}
   try { app.disableHardwareAcceleration(); } catch {}
   // In some environments sandbox mode is decided very early; if we're in the main process, relaunch once with flags.
   if (process.type === 'browser' && !process.env.LOCAL_SPEECH_RELAUNCHED) {
     try {
       const { spawn } = require('child_process');
-      const args = process.argv.slice(1).filter(a => a !== '--no-sandbox' && a !== '--disable-gpu');
-      args.push('--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage');
+      const args = process.argv.slice(1).filter(a => !['--no-sandbox','--disable-setuid-sandbox','--disable-gpu','--disable-dev-shm-usage'].includes(a));
+      args.push('--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage');
       const child = spawn(process.execPath, args, {
         detached: true,
         stdio: 'ignore',
