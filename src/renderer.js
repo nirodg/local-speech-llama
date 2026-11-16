@@ -6,6 +6,7 @@ let state = null;
 let audioPath = null;
 let unlog = null, micUnlog = null;
 let defaultsApplied = false;
+let modelsInfo = null;
 // mic
 let mediaRecorder=null, micChunks=[], micStream=null, micStartAt=0, micTimerInt=null;
 let micAudioCtx=null, micAnalyser=null, micLevelInt=null, micLastSpeaking=false;
@@ -34,7 +35,11 @@ function startMicMonitor(stream){
 // live
 let liveStream=null, liveRecorder=null, liveRunning=false, liveStopping=false, liveChunksDone=0, liveSeq=0, liveStartAt=0, liveTimerInt=null, liveQueue=[], liveProcessing=false, liveFullText='', liveChunkMs=6000, liveMode='fixed', liveAudioCtx=null, liveAnalyser=null, liveVadInt=null, liveSpeechSeen=false, liveLastVoiceAt=0, liveChunkStartedAt=0, liveStartedByHotkey=false, pendingHotkeyLive=false, liveSessionSpeechSeen=false, liveSessionLastVoiceAt=0, liveChunkSpeechSeen=false, liveAutoStopTriggered=false;
 
-async function refresh(){ state = await window.offlineApi.getStatus(); render(); }
+async function refresh(){
+  try { modelsInfo = await window.offlineApi.getModels(); } catch (e) { console.error('getModels failed', e); }
+  state = await window.offlineApi.getStatus();
+  render();
+}
 
 function setRunStatus(msg, kind){ const el=document.getElementById('run-status'); if(el){el.textContent=msg; el.className='run-status '+(kind||'muted');} }
 function appendLog(s){ const el=document.getElementById('log'); if(!el) return; if(el.textContent.startsWith('Ready.')) el.textContent=''; el.textContent += s; el.scrollTop = el.scrollHeight; }
@@ -46,10 +51,22 @@ function appendServerLog(s){ const el=document.getElementById('server-log'); if(
 let flashTimer=null;
 function flash(msg){ let el=document.getElementById('toast'); if(!el){ el=document.createElement('div'); el.id='toast'; document.body.appendChild(el);} el.textContent=msg; el.className='toast show'; clearTimeout(flashTimer); flashTimer=setTimeout(()=>el.className='toast',1500); }
 
+async function ensureModelsInfo(){
+  if (modelsInfo && modelsInfo.catalog) return modelsInfo;
+  try { modelsInfo = await window.offlineApi.getModels(); } catch (e) { console.error('getModels failed', e); }
+  return modelsInfo;
+}
+
 function renderModels(){
   const sel = document.getElementById('model-select');
   const descEl = document.getElementById('model-desc');
-  if (!sel || !modelsInfo) return;
+  if (!sel) return;
+  if (!modelsInfo || !modelsInfo.catalog) {
+    ensureModelsInfo().then(() => { if (modelsInfo && modelsInfo.catalog) renderModels(); }).catch(()=>{});
+    sel.innerHTML = '<option value="">Loading models…</option>';
+    if (descEl) descEl.textContent = 'Loading available models…';
+    return;
+  }
   const current = modelsInfo.selectedId;
   const prev = sel.value;
   sel.innerHTML = (modelsInfo.catalog || []).map(m => {
