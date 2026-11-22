@@ -21,3 +21,6 @@ Thumbs.db
 
 # electron-builder caches
 .cache/
+
+__pycache__/
+*.pyc
