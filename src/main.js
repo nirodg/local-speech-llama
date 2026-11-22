@@ -32,6 +32,8 @@ const http = require('http');
 const https = require('https');
 const { spawn, spawnSync, execSync } = require('child_process');
 const { runTranscription } = require('./transcribe');
+const { formatTranscript } = require('./format');
+const { cleanupTranscript } = require('./cleanup');
 
 function findCmd(names) {
   for (const n of names) {
@@ -51,7 +53,7 @@ function historyPath() { return path.join(app.getPath('userData'), 'history.json
 function ensureDir(p) { fs.mkdirSync(p, { recursive: true }); return p; }
 
 function loadConfig() {
-  const defaults = { autoCopy: false, autoPaste: false, globalHotkeyEnabled: false, globalHotkey: 'CommandOrControl+Alt+Space', llamaServerUrl: '', defaultLanguage: 'en', autoStopSeconds: 3, autoStart: false, model: DEFAULT_MODEL_ID };
+  const defaults = { autoCopy: false, autoPaste: false, globalHotkeyEnabled: false, globalHotkey: 'CommandOrControl+Alt+Space', llamaServerUrl: '', defaultLanguage: 'en', autoStopSeconds: 3, autoStart: false, model: DEFAULT_MODEL_ID, cleanupEnabled: false, cleanupUrl: 'http://127.0.0.1:8001', cleanupModel: 'qwen3.6-colibri', cleanupProfile: 'default', formatRemoveFillers: true, formatSelfCorrections: true, formatPunctuationCommands: true, formatCapitalize: true, formatProfile: 'default', asrBackend: 'managed-llama', fasterWhisperModel: 'small', fasterWhisperDevice: 'auto', fasterWhisperComputeType: 'int8' };
   try {
     const c = JSON.parse(fs.readFileSync(configPath(), 'utf8'));
     const merged = { ...defaults, ...c };
@@ -96,6 +98,7 @@ let listeningActive = false;
 let registeredHotkey = null;
 let hotkeyRegistration = { ok: false, registered: false, accelerator: null, error: null };
 let managedLlama = { proc: null, port: 8178, startedByApp: false, bin: null, model: getSelectedModel().hf, url: null, log: '', lastEnsure: null };
+let managedFasterWhisper = { proc: null, port: 8179, startedByApp: false, model: 'small', url: null, log: '', lastEnsure: null };
 let serverSetup = { state: 'idle', message: '', error: null, installing: false };
 const SCAN_PORTS = [9931, 8080, 8178, 8081, 8082, 11434];
 
@@ -595,6 +598,7 @@ async function getStatus() {
       models,
       logTail: managedLlama.log ? managedLlama.log.slice(-600) : '',
     },
+    fasterWhisper: await (async () => { const fwUrl = `http://127.0.0.1:${managedFasterWhisper.port}`; const fw = await probeFasterWhisper(fwUrl).catch(() => ({ running: false })); return { running: !!fw.running, baseUrl: fw.running ? fwUrl : null, managed: managedFasterWhisper.startedByApp && !!managedFasterWhisper.proc, pid: managedFasterWhisper.proc ? managedFasterWhisper.proc.pid : null, model: cfg.fasterWhisperModel || 'small', logTail: managedFasterWhisper.log ? managedFasterWhisper.log.slice(-600) : '' }; })(),
     serverSetup,
     config: { ...cfg, autoStart: isAutoStartEnabled(), model: selected.id },
     hotkey: hotkeyRegistration,
@@ -622,20 +626,112 @@ function saveMicRecording(buffer, mimeType) {
   return { rawPath, finalPath, converted, convErr };
 }
 
+async function probeFasterWhisper(baseUrl) {
+  const h = await httpGetJson(`${baseUrl.replace(/\/$/, '')}/health`, 1200);
+  if (h.ok && h.json && h.json.status === 'ok') return { running: true, baseUrl, health: h.json };
+  return { running: false, baseUrl };
+}
+
+function stopManagedFasterWhisper() {
+  const p = managedFasterWhisper.proc;
+  if (p && !p.killed) {
+    try { p.kill('SIGTERM'); } catch {}
+    setTimeout(() => { try { if (!p.killed) p.kill('SIGKILL'); } catch {} }, 2000);
+  }
+  managedFasterWhisper.proc = null; managedFasterWhisper.startedByApp = false;
+}
+
+async function ensureManagedFasterWhisper(onLine) {
+  const cfg = loadConfig();
+  const port = managedFasterWhisper.port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const running = await probeFasterWhisper(baseUrl);
+  if (running.running) { managedFasterWhisper.url = baseUrl; managedFasterWhisper.startedByApp = !!(managedFasterWhisper.proc && !managedFasterWhisper.proc.killed); return { ok: true, running: true, reused: true, baseUrl }; }
+  if (!(managedFasterWhisper.proc && !managedFasterWhisper.proc.killed)) {
+    const uv = findCmd(['uv']);
+    if (!uv) return { ok: false, running: false, error: 'uv not found (needed to run managed faster-whisper backend)' };
+    const script = path.join(__dirname, '..', 'tools', 'faster_whisper_server.py');
+    if (!fs.existsSync(script)) return { ok: false, running: false, error: `faster-whisper server script missing: ${script}` };
+    const model = (cfg.fasterWhisperModel || 'small').trim() || 'small';
+    const device = (cfg.fasterWhisperDevice || 'auto').trim() || 'auto';
+    const computeType = (cfg.fasterWhisperComputeType || 'int8').trim() || 'int8';
+    managedFasterWhisper.model = model;
+    const args = ['run', '--with', 'faster-whisper', '--with', 'fastapi', '--with', 'uvicorn', '--with', 'python-multipart', 'python', script, '--host', '127.0.0.1', '--port', String(port), '--model', model, '--device', device, '--compute-type', computeType];
+    onLine && onLine(`[faster-whisper] starting: ${uv} ${args.join(' ')}\n`);
+    const child = spawn(uv, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
+    managedFasterWhisper.proc = child; managedFasterWhisper.startedByApp = true; managedFasterWhisper.log = ''; managedFasterWhisper.url = baseUrl;
+    child.stdout.on('data', d => { managedFasterWhisper.log = (managedFasterWhisper.log + d.toString()).slice(-6000); });
+    child.stderr.on('data', d => { managedFasterWhisper.log = (managedFasterWhisper.log + d.toString()).slice(-6000); });
+    child.on('exit', (code) => { if (managedFasterWhisper.proc === child) { managedFasterWhisper.proc = null; managedFasterWhisper.startedByApp = false; } managedFasterWhisper.lastExit = code; });
+  }
+  const start = Date.now();
+  const timeoutMs = 10 * 60 * 1000;
+  while (Date.now() - start < timeoutMs) {
+    const r = await probeFasterWhisper(baseUrl);
+    if (r.running) { managedFasterWhisper.url = baseUrl; return { ok: true, running: true, startedByApp: true, baseUrl, pid: managedFasterWhisper.proc ? managedFasterWhisper.proc.pid : null }; }
+    if (managedFasterWhisper.proc && managedFasterWhisper.proc.exitCode != null) break;
+    await new Promise(res => setTimeout(res, 1000));
+  }
+  const r = await probeFasterWhisper(baseUrl);
+  return { ok: r.running, running: r.running, startedByApp: managedFasterWhisper.startedByApp, baseUrl, pid: managedFasterWhisper.proc ? managedFasterWhisper.proc.pid : null, error: r.running ? null : 'faster-whisper server not ready yet (it may still be downloading/loading the model)', logTail: managedFasterWhisper.log.slice(-1200) };
+}
+
+async function maybeCleanupTranscript(text, sender, opts = {}) {
+  const cfg = loadConfig();
+  const onLine = (line) => { try { sender && sender.send('transcribe-log', line); } catch {} };
+  const language = opts.language || cfg.defaultLanguage || 'auto';
+  const profile = opts.profile || cfg.formatProfile || 'default';
+  const formatted = formatTranscript(text, {
+    removeFillers: !!cfg.formatRemoveFillers,
+    removeSelfCorrections: !!cfg.formatSelfCorrections,
+    punctuationCommands: !!cfg.formatPunctuationCommands,
+    capitalize: cfg.formatCapitalize !== false,
+    language,
+    profile,
+  });
+  if (formatted.applied.length) onLine(`[format] applied: ${formatted.applied.join(', ')} lang=${formatted.language} profile=${formatted.profile}\n`);
+  let out = formatted.text;
+  let cleanup = { skipped: true };
+  if (cfg.cleanupEnabled) {
+    const r = await cleanupTranscript({ text: out, baseUrl: cfg.cleanupUrl, model: cfg.cleanupModel, profile: cfg.cleanupProfile || 'default', onLine });
+    out = r.text;
+    cleanup = { skipped: false, ok: !!r.ok, ms: r.ms || null, error: r.error || null, model: cfg.cleanupModel, baseUrl: cfg.cleanupUrl, profile: cfg.cleanupProfile || 'default' };
+  }
+  return { text: out, cleanup, format: { applied: formatted.applied, profile: formatted.profile, language: formatted.language } };
+}
+
 async function transcribeWithLlama(audioPath, language, sender) {
   const onLine = (line) => { try { sender && sender.send('transcribe-log', line); } catch {} };
-  let running = await detectRunningLlamaServer();
-  if (!running.running) {
-    onLine('[llama-server] no running instance detected, ensuring llama-server (may install/start)...\n');
-    const ensured = await runWithEnsureLock(() => autoEnsureServer(onLine));
-    managedLlama.lastEnsure = ensured;
-    running = await detectRunningLlamaServer();
+  const cfg = loadConfig();
+  let baseUrl = null;
+
+  if (cfg.asrBackend === 'managed-faster-whisper') {
+    const fwUrl = `http://127.0.0.1:${managedFasterWhisper.port}`;
+    let fw = await probeFasterWhisper(fwUrl);
+    if (!fw.running) {
+      onLine('[faster-whisper] no running instance detected, starting managed faster-whisper...\n');
+      const ensured = await ensureManagedFasterWhisper(onLine);
+      managedFasterWhisper.lastEnsure = ensured;
+      fw = await probeFasterWhisper(fwUrl);
+    }
+    if (!fw.running) return { ok: false, error: 'faster-whisper backend not running and failed to start. Check uv/python/model logs.', audioPath, logTail: managedFasterWhisper.log.slice(-1200) };
+    baseUrl = fw.baseUrl;
+  } else {
+    let running = await detectRunningLlamaServer();
+    if (!running.running) {
+      if (cfg.asrBackend === 'external') {
+        return { ok: false, error: 'External ASR endpoint not reachable. Check Preferred server URL.', audioPath };
+      }
+      onLine('[llama-server] no running instance detected, ensuring llama-server (may install/start)...\n');
+      const ensured = await runWithEnsureLock(() => autoEnsureServer(onLine));
+      managedLlama.lastEnsure = ensured;
+      running = await detectRunningLlamaServer();
+    }
+    if (!running.running) return { ok: false, error: 'No llama-server running and failed to start one. Check llama-server binary and logs.', audioPath, logTail: managedLlama.log.slice(-1200) };
+    baseUrl = running.baseUrl;
   }
-  if (!running.running) {
-    return { ok: false, error: 'No llama-server running and failed to start one. Check llama-server binary and logs.', audioPath, logTail: managedLlama.log.slice(-1200) };
-  }
-  const baseUrl = running.baseUrl;
-  onLine(`[llama-server] using ${baseUrl}\n`);
+
+  onLine(`[asr] using ${baseUrl}\n`);
   const result = await runTranscription({ audioPath, language, baseUrl, onLine });
   return { ...result, audioPath, baseUrl };
 }
@@ -998,6 +1094,13 @@ app.whenReady().then(() => {
   ipcMain.handle('clear-history', async () => { saveHistory([]); return await getStatus(); });
   ipcMain.handle('delete-history-item', async (_e, id) => { const items = loadHistory().filter(x => x.id !== id); saveHistory(items); return await getStatus(); });
   ipcMain.handle('copy-text', (_e, text) => { try { clipboard.writeText(String(text || '')); return { ok: true }; } catch (e) { return { ok: false, error: e.message }; } });
+  ipcMain.handle('insert-text', (_e, text) => {
+    const t = String(text || '');
+    if (!t.trim()) return { ok: false, error: 'No text to insert' };
+    try { clipboard.writeText(t); } catch (e) { return { ok: false, error: e.message }; }
+    const p = pasteIntoActiveApp();
+    return { ok: !!p.ok, copied: true, ...p };
+  });
   ipcMain.handle('set-auto-copy', async (_e, v) => { const cfg = loadConfig(); cfg.autoCopy = !!v; saveConfig(cfg); return await getStatus(); });
   ipcMain.handle('set-auto-paste', async (_e, v) => { const cfg = loadConfig(); cfg.autoPaste = !!v; saveConfig(cfg); return await getStatus(); });
   ipcMain.handle('set-default-language', async (_e, v) => { const cfg = loadConfig(); const allowed = new Set(['auto','en','ro','de','fr','es','it','pt','nl','pl','uk','ru']); const lang = String(v || 'en'); cfg.defaultLanguage = allowed.has(lang) ? lang : 'en'; saveConfig(cfg); return await getStatus(); });
@@ -1018,6 +1121,38 @@ app.whenReady().then(() => {
     return { status: await getStatus(), hotkey };
   });
   ipcMain.handle('set-llama-url', async (_e, url) => { const cfg = loadConfig(); cfg.llamaServerUrl = (url || '').trim(); saveConfig(cfg); return await getStatus(); });
+  ipcMain.handle('set-asr-backend', async (_e, backend) => { const cfg = loadConfig(); const v = String(backend || 'managed-llama'); cfg.asrBackend = ['external', 'managed-faster-whisper', 'managed-llama'].includes(v) ? v : 'managed-llama'; saveConfig(cfg); return await getStatus(); });
+  ipcMain.handle('set-faster-whisper-model', async (_e, model) => { const cfg = loadConfig(); cfg.fasterWhisperModel = (model || '').trim() || 'small'; saveConfig(cfg); managedFasterWhisper.model = cfg.fasterWhisperModel; return await getStatus(); });
+  ipcMain.handle('set-faster-whisper-device', async (_e, device) => { const cfg = loadConfig(); cfg.fasterWhisperDevice = (device || '').trim() || 'auto'; saveConfig(cfg); return await getStatus(); });
+  ipcMain.handle('set-faster-whisper-compute-type', async (_e, computeType) => { const cfg = loadConfig(); cfg.fasterWhisperComputeType = (computeType || '').trim() || 'int8'; saveConfig(cfg); return await getStatus(); });
+  ipcMain.handle('detect-asr-hardware', async () => {
+    let gpu = null;
+    try {
+      const out = execSync('nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader,nounits', { encoding: 'utf8', timeout: 5000 }).trim();
+      const line = out.split(/\r?\n/).find(Boolean) || '';
+      const parts = line.split(',').map(s => s.trim());
+      if (parts.length >= 3) gpu = { name: parts[0], totalMiB: Number(parts[1]), freeMiB: Number(parts[2]) };
+    } catch {}
+    let cuda = false;
+    try { execSync('nvidia-smi -L', { encoding: 'utf8', timeout: 5000 }); cuda = !!gpu; } catch {}
+    const rec = { backend: 'managed-faster-whisper', device: cuda ? 'cuda' : 'cpu', computeType: cuda ? 'int8_float16' : 'int8', model: 'small' };
+    if (gpu) {
+      if (gpu.totalMiB >= 10000) { rec.model = 'large-v3-turbo'; rec.computeType = 'float16'; }
+      else if (gpu.totalMiB >= 6000) { rec.model = 'distil-large-v3'; rec.computeType = cuda ? 'int8_float16' : 'int8'; }
+      else if (gpu.totalMiB >= 4000) { rec.model = 'small'; rec.computeType = 'int8'; }
+      else { rec.model = 'base'; rec.computeType = 'int8'; }
+    } else { rec.model = 'small'; rec.computeType = 'int8'; rec.device = 'cpu'; }
+    return { ok: true, gpu, cuda, recommendation: rec };
+  });
+  ipcMain.handle('set-cleanup-enabled', async (_e, v) => { const cfg = loadConfig(); cfg.cleanupEnabled = !!v; saveConfig(cfg); return await getStatus(); });
+  ipcMain.handle('set-cleanup-url', async (_e, url) => { const cfg = loadConfig(); cfg.cleanupUrl = (url || '').trim(); saveConfig(cfg); return await getStatus(); });
+  ipcMain.handle('set-cleanup-model', async (_e, model) => { const cfg = loadConfig(); cfg.cleanupModel = (model || '').trim() || 'qwen3.6-colibri'; saveConfig(cfg); return await getStatus(); });
+  ipcMain.handle('set-cleanup-profile', async (_e, v) => { const cfg = loadConfig(); const p = String(v || 'default').toLowerCase(); cfg.cleanupProfile = ['default','email','chat','code'].includes(p) ? p : 'default'; saveConfig(cfg); return await getStatus(); });
+  ipcMain.handle('set-format-remove-fillers', async (_e, v) => { const cfg = loadConfig(); cfg.formatRemoveFillers = !!v; saveConfig(cfg); return await getStatus(); });
+  ipcMain.handle('set-format-self-corrections', async (_e, v) => { const cfg = loadConfig(); cfg.formatSelfCorrections = !!v; saveConfig(cfg); return await getStatus(); });
+  ipcMain.handle('set-format-punctuation-commands', async (_e, v) => { const cfg = loadConfig(); cfg.formatPunctuationCommands = !!v; saveConfig(cfg); return await getStatus(); });
+  ipcMain.handle('set-format-capitalize', async (_e, v) => { const cfg = loadConfig(); cfg.formatCapitalize = !!v; saveConfig(cfg); return await getStatus(); });
+  ipcMain.handle('set-format-profile', async (_e, v) => { const cfg = loadConfig(); const p = String(v || 'default').toLowerCase(); cfg.formatProfile = ['default','email','chat','code'].includes(p) ? p : 'default'; saveConfig(cfg); return await getStatus(); });
   ipcMain.handle('get-models', async () => getModelsInfo());
   ipcMain.handle('install-llama-server', async (e) => runWithEnsureLock(async () => {
     if (listeningActive) return { ok: false, error: 'Cannot install llama-server while listening/recording is active.', status: await getStatus() };
@@ -1051,7 +1186,12 @@ app.whenReady().then(() => {
     const { audioPath, language } = payload || {};
     const result = await transcribeWithLlama(audioPath, language, e.sender);
     if (result && result.ok && (result.transcript || '').trim()) {
-      addHistory({ source: 'file', audioPath, language: language || 'auto', transcript: result.transcript, ms: result.ms });
+      const cleaned = await maybeCleanupTranscript(result.transcript, e.sender, { language: language || 'auto' });
+      result.rawTranscript = result.transcript;
+      result.transcript = cleaned.text;
+      result.cleanup = cleaned.cleanup;
+      result.format = cleaned.format;
+      addHistory({ source: 'file', audioPath, language: language || 'auto', transcript: result.transcript, ms: result.ms, cleanup: cleaned.cleanup, format: cleaned.format });
       result.auto = maybeAutoPaste(result.transcript);
     }
     return { ...result, status: await getStatus() };
@@ -1065,7 +1205,12 @@ app.whenReady().then(() => {
       if (saved.convErr) { try { e.sender.send('transcribe-log', `[mic] ffmpeg warning: ${saved.convErr}\n`); } catch {} }
       const result = await transcribeWithLlama(saved.finalPath, language, e.sender);
       if (result && result.ok && (result.transcript || '').trim()) {
-        addHistory({ source: 'mic', audioPath: '(not stored)', language: language || 'auto', transcript: result.transcript, ms: result.ms });
+        const cleaned = await maybeCleanupTranscript(result.transcript, e.sender, { language: language || 'auto' });
+        result.rawTranscript = result.transcript;
+        result.transcript = cleaned.text;
+        result.cleanup = cleaned.cleanup;
+        result.format = cleaned.format;
+        addHistory({ source: 'mic', audioPath: '(not stored)', language: language || 'auto', transcript: result.transcript, ms: result.ms, cleanup: cleaned.cleanup, format: cleaned.format });
         result.auto = maybeAutoPaste(result.transcript);
       }
       return { ...result, status: await getStatus() };
@@ -1078,6 +1223,44 @@ app.whenReady().then(() => {
         for (const fp of [saved.finalPath, saved.rawPath, saved.wavPath]) {
           try { if (fp && fs.existsSync(fp)) fs.unlinkSync(fp); } catch {}
         }
+      }
+    }
+  });
+  ipcMain.handle('transcribe-live-interim', async (e, payload) => {
+    const { buffer, mimeType, language, seq } = payload || {};
+    let rawPath = null, finalPath = null, wavPath = null;
+    try {
+      const dir = ensureDir(path.join(app.getPath('userData'), 'recordings', 'live'));
+      const ts = Date.now();
+      const ext = (mimeType && mimeType.includes('wav')) ? 'wav' : (mimeType && mimeType.includes('ogg')) ? 'ogg' : 'webm';
+      rawPath = path.join(dir, `live-interim-${ts}-${seq || 0}.${ext}`);
+      fs.writeFileSync(rawPath, Buffer.from(buffer));
+      wavPath = rawPath.replace(/\.[^.]+$/, '.wav');
+      const ff = findCmd(['ffmpeg']);
+      finalPath = rawPath;
+      if (ff && ext !== 'wav') {
+        const r = spawnSync(ff, ['-y', '-i', rawPath, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wavPath], { encoding: 'utf8' });
+        if (r.status === 0 && fs.existsSync(wavPath)) finalPath = wavPath;
+      } else if (ext === 'wav') { finalPath = rawPath; }
+      const result = await transcribeWithLlama(finalPath, language, e.sender);
+      if (result && result.ok && (result.transcript || '').trim()) {
+        const cfg = loadConfig();
+        const formatted = formatTranscript(result.transcript, {
+          removeFillers: !!cfg.formatRemoveFillers,
+          removeSelfCorrections: !!cfg.formatSelfCorrections,
+          punctuationCommands: !!cfg.formatPunctuationCommands,
+          capitalize: cfg.formatCapitalize !== false,
+          language: language || cfg.defaultLanguage || 'auto',
+          profile: cfg.formatProfile || 'default',
+        });
+        result.transcript = formatted.text;
+      }
+      return { ...result, seq, interim: true };
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err), seq, interim: true };
+    } finally {
+      for (const fp of [finalPath, wavPath, rawPath]) {
+        try { if (fp && fs.existsSync(fp)) fs.unlinkSync(fp); } catch {}
       }
     }
   });
@@ -1102,6 +1285,20 @@ app.whenReady().then(() => {
       try { e.sender.send('transcribe-log', `[live#${seq || 0}] audio chunk ready for STT\n`); } catch {}
       if (convErr) { try { e.sender.send('transcribe-log', `[live#${seq || 0}] ffmpeg warning: ${convErr}\n`); } catch {} }
       const result = await transcribeWithLlama(finalPath, language, e.sender);
+      if (result && result.ok && (result.transcript || '').trim()) {
+        const cfg = loadConfig();
+        const formatted = formatTranscript(result.transcript, {
+          removeFillers: !!cfg.formatRemoveFillers,
+          removeSelfCorrections: !!cfg.formatSelfCorrections,
+          punctuationCommands: !!cfg.formatPunctuationCommands,
+          capitalize: cfg.formatCapitalize !== false,
+          language: language || cfg.defaultLanguage || 'auto',
+          profile: cfg.formatProfile || 'default',
+        });
+        result.rawTranscript = result.transcript;
+        result.transcript = formatted.text;
+        result.format = { applied: formatted.applied, profile: formatted.profile, language: formatted.language };
+      }
       return { ...result, seq };
     } catch (err) {
       const msg = (err && err.code === 'ENOSPC') ? 'No space left on device while processing live audio chunk. Free disk space.' : (err && err.message) || String(err);
@@ -1113,11 +1310,21 @@ app.whenReady().then(() => {
       }
     }
   });
-  ipcMain.handle('save-live-history', async (_e, payload) => {
+  ipcMain.handle('save-live-history', async (e, payload) => {
     const { transcript, language, ms, forcePaste } = payload || {};
     let auto = null;
-    if ((transcript || '').trim()) { addHistory({ source: 'live', audioPath: '(chunked live session)', language: language || 'auto', transcript, ms: ms || null }); auto = maybeAutoPaste(transcript, { forcePaste: !!forcePaste }); }
-    return { status: await getStatus(), auto };
+    let cleanup = null;
+    let format = null;
+    let finalTranscript = String(transcript || '').trim();
+    if (finalTranscript) {
+      const cleaned = await maybeCleanupTranscript(finalTranscript, e.sender, { language: language || 'auto' });
+      finalTranscript = cleaned.text;
+      cleanup = cleaned.cleanup;
+      format = cleaned.format;
+      addHistory({ source: 'live', audioPath: '(chunked live session)', language: language || 'auto', transcript: finalTranscript, ms: ms || null, cleanup, format });
+      auto = maybeAutoPaste(finalTranscript, { forcePaste: !!forcePaste });
+    }
+    return { status: await getStatus(), auto, transcript: finalTranscript, cleanup, format };
   });
 
   createWindow();
@@ -1126,6 +1333,6 @@ app.whenReady().then(() => {
   runWithEnsureLock(() => autoEnsureServer()).then(r => { if (r) managedLlama.lastEnsure = r; }).catch(() => {});
   app.on('activate', () => { showMainWindow(); applyGlobalHotkey(); });
 });
-app.on('before-quit', () => { isQuitting = true; stopManagedLlamaServer(); if (tray) { try { tray.destroy(); } catch {} tray = null; } });
-app.on('will-quit', () => { stopManagedLlamaServer(); try { globalShortcut.unregisterAll(); } catch {} });
+app.on('before-quit', () => { isQuitting = true; stopManagedLlamaServer(); stopManagedFasterWhisper(); if (tray) { try { tray.destroy(); } catch {} tray = null; } });
+app.on('will-quit', () => { stopManagedLlamaServer(); stopManagedFasterWhisper(); try { globalShortcut.unregisterAll(); } catch {} });
 app.on('window-all-closed', () => { if (isQuitting) app.quit(); });
