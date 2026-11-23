@@ -719,8 +719,11 @@ async function transcribeWithLlama(audioPath, language, sender) {
   } else {
     let running = await detectRunningLlamaServer();
     if (!running.running) {
-      if (cfg.asrBackend === 'external') {
-        return { ok: false, error: 'External ASR endpoint not reachable. Check Preferred server URL.', audioPath };
+      if (cfg.asrBackend === 'external' || cfg.asrBackend === 'colibri') {
+        const hint = cfg.asrBackend === 'colibri'
+          ? 'Colibri ASR endpoint not reachable. Start Colibri openai_server and check Preferred server URL (e.g. http://127.0.0.1:8080).'
+          : 'External ASR endpoint not reachable. Check Preferred server URL.';
+        return { ok: false, error: hint, audioPath };
       }
       onLine('[llama-server] no running instance detected, ensuring llama-server (may install/start)...\n');
       const ensured = await runWithEnsureLock(() => autoEnsureServer(onLine));
@@ -1121,7 +1124,7 @@ app.whenReady().then(() => {
     return { status: await getStatus(), hotkey };
   });
   ipcMain.handle('set-llama-url', async (_e, url) => { const cfg = loadConfig(); cfg.llamaServerUrl = (url || '').trim(); saveConfig(cfg); return await getStatus(); });
-  ipcMain.handle('set-asr-backend', async (_e, backend) => { const cfg = loadConfig(); const v = String(backend || 'managed-llama'); cfg.asrBackend = ['external', 'managed-faster-whisper', 'managed-llama'].includes(v) ? v : 'managed-llama'; saveConfig(cfg); return await getStatus(); });
+  ipcMain.handle('set-asr-backend', async (_e, backend) => { const cfg = loadConfig(); const v = String(backend || 'managed-llama'); cfg.asrBackend = ['external', 'managed-faster-whisper', 'managed-llama', 'colibri'].includes(v) ? v : 'managed-llama'; saveConfig(cfg); return await getStatus(); });
   ipcMain.handle('set-faster-whisper-model', async (_e, model) => { const cfg = loadConfig(); cfg.fasterWhisperModel = (model || '').trim() || 'small'; saveConfig(cfg); managedFasterWhisper.model = cfg.fasterWhisperModel; return await getStatus(); });
   ipcMain.handle('set-faster-whisper-device', async (_e, device) => { const cfg = loadConfig(); cfg.fasterWhisperDevice = (device || '').trim() || 'auto'; saveConfig(cfg); return await getStatus(); });
   ipcMain.handle('set-faster-whisper-compute-type', async (_e, computeType) => { const cfg = loadConfig(); cfg.fasterWhisperComputeType = (computeType || '').trim() || 'int8'; saveConfig(cfg); return await getStatus(); });

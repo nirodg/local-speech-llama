@@ -159,6 +159,7 @@ function render(){
   ];
   document.getElementById('status').innerHTML = rows.map(([k,v])=>`<div>${k}</div><div>${esc(v ?? '')}</div>`).join('');
   const urlInput = document.getElementById('llama-url'); if(urlInput && document.activeElement !== urlInput) urlInput.value = cfg.llamaServerUrl || '';
+  const backendSel = document.getElementById('asr-backend'); if(backendSel && document.activeElement !== backendSel) backendSel.value = cfg.asrBackend || 'managed-llama';
   renderModels();
   const serverTxt = running ? (srv.baseUrl || 'running') : 'not running';
   for(const id of ['live-server','mic-server','file-server']){ const el=document.getElementById(id); if(el) el.textContent = serverTxt; }
@@ -276,7 +277,15 @@ if (installServerBtn) installServerBtn.addEventListener('click', async ()=>{
 });
 document.getElementById('save-url-btn').addEventListener('click', async ()=>{
   const url = (document.getElementById('llama-url').value||'').trim();
-  state = await window.offlineApi.setLlamaUrl(url); render(); flash(url ? 'Preferred server URL saved' : 'Preferred server URL cleared');
+  state = await window.offlineApi.setLlamaUrl(url); render(); flash(url ? 'Server URL saved' : 'Server URL cleared');
+});
+document.getElementById('asr-backend').addEventListener('change', async (e)=>{
+  const backend = e.target.value;
+  if (backend === 'colibri' && !(document.getElementById('llama-url').value||'').trim()) {
+    document.getElementById('llama-url').value = 'http://127.0.0.1:8080';
+    await window.offlineApi.setLlamaUrl('http://127.0.0.1:8080');
+  }
+  state = await window.offlineApi.setAsrBackend(backend); render(); flash(`ASR backend: ${backend}`);
 });
 const modelSel = document.getElementById('model-select');
 if (modelSel) modelSel.addEventListener('change', ()=>{ renderModels(); });

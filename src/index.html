@@ -96,7 +96,15 @@
                 </div>
                 <div id="model-desc" class="hint muted">Select a Qwen3-ASR model. If not cached, llama-server will download it on first start.</div>
                 <div class="actions wrap" style="margin:8px 0 0">
-                  <label class="inline grow">Preferred server URL <input id="llama-url" class="mono" placeholder="e.g. http://127.0.0.1:9931 (optional)" /></label>
+                  <label class="inline">ASR backend
+                    <select id="asr-backend">
+                      <option value="managed-llama">Managed llama-server</option>
+                      <option value="external">External OpenAI-compatible</option>
+                      <option value="colibri">Colibri (OpenAI /v1/audio/transcriptions)</option>
+                      <option value="managed-faster-whisper">Managed faster-whisper</option>
+                    </select>
+                  </label>
+                  <label class="inline grow">Server URL <input id="llama-url" class="mono" placeholder="e.g. http://127.0.0.1:8080 (Colibri) or 9931" /></label>
                   <button id="save-url-btn" class="secondary">Save</button>
                 </div>
                 <div id="server-msg" class="hint">Auto-setup: reuses a running llama-server, or installs/starts a managed one and downloads the selected model if needed.</div>
